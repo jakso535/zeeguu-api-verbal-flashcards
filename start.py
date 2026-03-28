@@ -1,6 +1,9 @@
 #!python3
 import logging
 
+import pymysql
+pymysql.install_as_MySQLdb()
+
 # this is needed since when run as wsgi this script
 # can't access the systems' env vars. so we load them
 # in another local configuration file.

@@ -3,37 +3,34 @@ import flask
 import io
 import os
 import tempfile
-import json
-from datetime import datetime
+import random
 from flask import request
 from sqlalchemy.exc import NoResultFound
 
+from zeeguu.core.model.user import User
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
-from zeeguu.core.model.user import User
+from . import api, db_session
 from zeeguu.logging import log
 
-# Import your ASR model - you'll need to adapt this to your setup
-# This assumes you have a way to call your Python ASR model
+# Try to import ASR libraries, but make it optional
 try:
     import nemo.collections.asr as nemo_asr
     from pydub import AudioSegment
     ASR_AVAILABLE = True
-except ImportError:
+    # Load the ASR model once at module load
+    asr_model = nemo_asr.models.ASRModel.from_pretrained(
+        model_name="nvidia/parakeet-rnnt-110m-da-dk"
+    )
+    log("ASR model loaded successfully")
+except ImportError as e:
     ASR_AVAILABLE = False
-    log("ASR libraries not available - transcription will be mocked")
-
-# Load the ASR model once at module load (similar to how NeMo is loaded in your main.py)
-asr_model = None
-if ASR_AVAILABLE:
-    try:
-        asr_model = nemo_asr.models.ASRModel.from_pretrained(
-            model_name="nvidia/parakeet-rnnt-110m-da-dk"
-        )
-        log("ASR model loaded successfully")
-    except Exception as e:
-        log(f"Failed to load ASR model: {e}")
-        ASR_AVAILABLE = False
+    asr_model = None
+    log(f"ASR libraries not available: {e}")
+except Exception as e:
+    ASR_AVAILABLE = False
+    asr_model = None
+    log(f"Failed to load ASR model: {e}")
 
 
 # ====================================
@@ -165,308 +162,284 @@ def transcribe_audio(audio_file):
 # API Endpoints
 # ====================================
 
-def init_api(app):
-    """Initialize the verbal flashcards API endpoints"""
+@api.route("/verbal_flashcards/transcribe", methods=["POST"])
+@cross_domain
+@requires_session
+def transcribe_audio_endpoint():
+    """
+    Transcribe an audio recording for a verbal flashcard exercise.
+    
+    Expected form data:
+    - file: audio file (required)
+    - flashcard_id: optional ID of the current flashcard
+    
+    Returns:
+    {
+        "transcription": "transcribed text",
+        "flashcard": {...}  # if flashcard_id provided
+    }
+    """
+    try:
+        # Get the uploaded file
+        if 'file' not in request.files:
+            return json_result({"error": "No audio file provided"}), 400
 
-    @app.route("/verbal_flashcards/transcribe", methods=["POST"])
-    @cross_domain
-    @requires_session
-    def transcribe_audio_endpoint():
-        """
-        Transcribe an audio recording for a verbal flashcard exercise.
-        
-        Expected form data:
-        - file: audio file (required)
-        - flashcard_id: optional ID of the current flashcard
-        
-        Returns:
-        {
-            "transcription": "transcribed text",
-            "flashcard": {...}  # if flashcard_id provided
-        }
-        """
-        try:
-            # Get the uploaded file
-            if 'file' not in request.files:
-                return json_result({"error": "No audio file provided"}), 400
+        audio_file = request.files['file']
+        if audio_file.filename == '':
+            return json_result({"error": "Empty filename"}), 400
 
-            audio_file = request.files['file']
-            if audio_file.filename == '':
-                return json_result({"error": "Empty filename"}), 400
+        # Get optional flashcard_id
+        flashcard_id = request.form.get('flashcard_id')
 
-            # Get optional flashcard_id
-            flashcard_id = request.form.get('flashcard_id')
+        # Transcribe the audio
+        transcription = transcribe_audio(audio_file)
 
-            # Transcribe the audio
-            transcription = transcribe_audio(audio_file)
-
-            # Get flashcard info if requested
-            flashcard = None
-            if flashcard_id:
-                flashcards = get_flashcard_collection()
-                flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
-
-            # Log user activity
-            user = User.find_by_id(flask.g.user_id)
-            log(f"User {user.id} transcribed audio for flashcard {flashcard_id}")
-
-            return json_result({
-                "success": True,
-                "transcription": transcription,
-                "flashcard": flashcard
-            })
-
-        except Exception as e:
-            log(f"Transcription endpoint error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
-
-
-    @app.route("/verbal_flashcards", methods=["GET"])
-    @cross_domain
-    @requires_session
-    def get_flashcards():
-        """
-        Get flashcards, optionally filtered by category and difficulty.
-        
-        Query parameters:
-        - category: filter by category (optional)
-        - difficulty: filter by difficulty (optional)
-        - limit: max number of cards to return (optional, default 50)
-        - offset: pagination offset (optional, default 0)
-        
-        Returns list of flashcards.
-        """
-        try:
-            # Get query parameters
-            category = request.args.get('category')
-            difficulty = request.args.get('difficulty')
-            limit = int(request.args.get('limit', 50))
-            offset = int(request.args.get('offset', 0))
-
-            # Get all flashcards
-            flashcards = get_flashcard_collection()
-
-            # Apply filters
-            if category:
-                flashcards = [f for f in flashcards if f['category'].lower() == category.lower()]
-
-            if difficulty:
-                flashcards = [f for f in flashcards if f['difficulty'].lower() == difficulty.lower()]
-
-            # Apply pagination
-            total = len(flashcards)
-            flashcards = flashcards[offset:offset + limit]
-
-            # Log user activity
-            user = User.find_by_id(flask.g.user_id)
-            log(f"User {user.id} requested flashcards with filters: category={category}, difficulty={difficulty}")
-
-            return json_result({
-                "flashcards": flashcards,
-                "total": total,
-                "limit": limit,
-                "offset": offset
-            })
-
-        except Exception as e:
-            log(f"Get flashcards error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
-
-
-    @app.route("/verbal_flashcards/<flashcard_id>", methods=["GET"])
-    @cross_domain
-    @requires_session
-    def get_flashcard_by_id(flashcard_id):
-        """
-        Get a single flashcard by ID.
-        
-        Returns the flashcard object.
-        """
-        try:
+        # Get flashcard info if requested
+        flashcard = None
+        if flashcard_id:
             flashcards = get_flashcard_collection()
             flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
 
-            if not flashcard:
-                return json_result({"error": "Flashcard not found"}), 404
+        # Log user activity
+        user = User.find_by_id(flask.g.user_id)
+        log(f"User {user.id} transcribed audio for flashcard {flashcard_id}")
 
-            # Log user activity
-            user = User.find_by_id(flask.g.user_id)
-            log(f"User {user.id} requested flashcard {flashcard_id}")
+        return json_result({
+            "success": True,
+            "transcription": transcription,
+            "flashcard": flashcard
+        })
 
-            return json_result(flashcard)
-
-        except Exception as e:
-            log(f"Get flashcard error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
-
-
-    @app.route("/verbal_flashcards/categories", methods=["GET"])
-    @cross_domain
-    @requires_session
-    def get_categories():
-        """
-        Get all available categories with counts and difficulties.
-        
-        Returns list of categories with metadata.
-        """
-        try:
-            flashcards = get_flashcard_collection()
-
-            # Group by category
-            categories = {}
-            for card in flashcards:
-                cat = card['category']
-                if cat not in categories:
-                    categories[cat] = {
-                        "name": cat,
-                        "count": 0,
-                        "difficulties": set()
-                    }
-                categories[cat]["count"] += 1
-                categories[cat]["difficulties"].add(card['difficulty'])
-
-            # Convert sets to lists
-            result = []
-            for cat in categories.values():
-                cat["difficulties"] = list(cat["difficulties"])
-                result.append(cat)
-
-            # Sort by name
-            result.sort(key=lambda x: x["name"])
-
-            return json_result(result)
-
-        except Exception as e:
-            log(f"Get categories error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
+    except Exception as e:
+        log(f"Transcription endpoint error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
 
 
-    @app.route("/verbal_flashcards/practice", methods=["GET"])
-    @cross_domain
-    @requires_session
-    def get_practice_set():
-        """
-        Get a set of flashcards for practice.
-        Uses spaced repetition to select appropriate cards.
-        
-        Query parameters:
-        - count: number of cards to return (optional, default 10)
-        
-        Returns list of flashcards for practice.
-        """
-        try:
-            count = int(request.args.get('count', 10))
-            user = User.find_by_id(flask.g.user_id)
+@api.route("/verbal_flashcards", methods=["GET"])
+@cross_domain
+@requires_session
+def get_flashcards():
+    """
+    Get flashcards, optionally filtered by category and difficulty.
+    
+    Query parameters:
+    - category: filter by category (optional)
+    - difficulty: filter by difficulty (optional)
+    - limit: max number of cards to return (optional, default 50)
+    - offset: pagination offset (optional, default 0)
+    
+    Returns list of flashcards.
+    """
+    try:
+        # Get query parameters
+        category = request.args.get('category')
+        difficulty = request.args.get('difficulty')
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
 
-            # In a real implementation, this would:
-            # 1. Fetch user's progress for each flashcard
-            # 2. Apply spaced repetition algorithm
-            # 3. Return cards due for review
+        # Get all flashcards
+        flashcards = get_flashcard_collection()
 
-            # For now, return random cards as a mock
-            import random
-            flashcards = get_flashcard_collection()
+        # Apply filters
+        if category:
+            flashcards = [f for f in flashcards if f['category'].lower() == category.lower()]
 
-            # Shuffle and take first 'count' cards
-            random.shuffle(flashcards)
-            practice_cards = flashcards[:count]
+        if difficulty:
+            flashcards = [f for f in flashcards if f['difficulty'].lower() == difficulty.lower()]
 
-            # Add user-specific data (in real implementation)
-            for card in practice_cards:
-                card["user_progress"] = {
-                    "repetitions": random.randint(0, 5),
-                    "last_practiced": None,
-                    "ease_factor": 2.5,
-                    "interval": 0
+        # Apply pagination
+        total = len(flashcards)
+        flashcards = flashcards[offset:offset + limit]
+
+        # Log user activity
+        user = User.find_by_id(flask.g.user_id)
+        log(f"User {user.id} requested flashcards with filters: category={category}, difficulty={difficulty}")
+
+        return json_result({
+            "flashcards": flashcards,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        })
+
+    except Exception as e:
+        log(f"Get flashcards error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
+
+
+@api.route("/verbal_flashcards/<flashcard_id>", methods=["GET"])
+@cross_domain
+@requires_session
+def get_flashcard_by_id(flashcard_id):
+    """
+    Get a single flashcard by ID.
+    
+    Returns the flashcard object.
+    """
+    try:
+        flashcards = get_flashcard_collection()
+        flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
+
+        if not flashcard:
+            return json_result({"error": "Flashcard not found"}), 404
+
+        # Log user activity
+        user = User.find_by_id(flask.g.user_id)
+        log(f"User {user.id} requested flashcard {flashcard_id}")
+
+        return json_result(flashcard)
+
+    except Exception as e:
+        log(f"Get flashcard error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
+
+
+@api.route("/verbal_flashcards/categories", methods=["GET"])
+@cross_domain
+@requires_session
+def get_categories():
+    """
+    Get all available categories with counts and difficulties.
+    
+    Returns list of categories with metadata.
+    """
+    try:
+        flashcards = get_flashcard_collection()
+
+        # Group by category
+        categories = {}
+        for card in flashcards:
+            cat = card['category']
+            if cat not in categories:
+                categories[cat] = {
+                    "name": cat,
+                    "count": 0,
+                    "difficulties": set()
                 }
+            categories[cat]["count"] += 1
+            categories[cat]["difficulties"].add(card['difficulty'])
 
-            log(f"User {user.id} requested practice set of size {count}")
+        # Convert sets to lists
+        result = []
+        for cat in categories.values():
+            cat["difficulties"] = list(cat["difficulties"])
+            result.append(cat)
 
-            return json_result({
-                "flashcards": practice_cards,
-                "count": len(practice_cards)
-            })
+        # Sort by name
+        result.sort(key=lambda x: x["name"])
 
-        except Exception as e:
-            log(f"Get practice set error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
+        return json_result(result)
 
-
-    @app.route("/verbal_flashcards/submit", methods=["POST"])
-    @cross_domain
-    @requires_session
-    def submit_answer():
-        """
-        Submit an answer for a flashcard and record performance.
-        
-        Expected JSON body:
-        {
-            "flashcard_id": "1",
-            "user_answer": "transcribed text or typed answer",
-            "is_correct": true/false,
-            "answer_source": "speech|typing",
-            "response_time_ms": 5000
-        }
-        
-        Returns updated user progress.
-        """
-        try:
-            data = request.get_json()
-            if not data:
-                return json_result({"error": "JSON body required"}), 400
-
-            flashcard_id = data.get('flashcard_id')
-            user_answer = data.get('user_answer', '')
-            is_correct = data.get('is_correct')
-            answer_source = data.get('answer_source', 'unknown')
-            response_time = data.get('response_time_ms', 0)
-
-            if not flashcard_id or is_correct is None:
-                return json_result({"error": "flashcard_id and is_correct are required"}), 400
-
-            # Get the flashcard
-            flashcards = get_flashcard_collection()
-            flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
-
-            if not flashcard:
-                return json_result({"error": "Flashcard not found"}), 404
-
-            user = User.find_by_id(flask.g.user_id)
-
-            # In a real implementation, this would:
-            # 1. Record the answer in a database
-            # 2. Update spaced repetition parameters
-            # 3. Log for analytics
-
-            # Mock response with updated progress
-            import random
-            new_interval = random.choice([1, 2, 4, 7, 14, 30])
-
-            log(f"User {user.id} answered flashcard {flashcard_id}: correct={is_correct}, source={answer_source}, time={response_time}ms")
-
-            return json_result({
-                "success": True,
-                "flashcard_id": flashcard_id,
-                "is_correct": is_correct,
-                "next_review": new_interval,
-                "message": "Answer recorded"
-            })
-
-        except Exception as e:
-            log(f"Submit answer error: {e}")
-            traceback.print_exc()
-            return json_result({"error": str(e)}), 500
+    except Exception as e:
+        log(f"Get categories error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
 
 
-# ====================================
-# Initialize the API
-# ====================================
-def register(app):
-    """Register the verbal flashcards API with the main app"""
-    init_api(app)
-    log("Verbal flashcards API registered")
+@api.route("/verbal_flashcards/practice", methods=["GET"])
+@cross_domain
+@requires_session
+def get_practice_set():
+    """
+    Get a set of flashcards for practice.
+    Uses spaced repetition to select appropriate cards.
+    
+    Query parameters:
+    - count: number of cards to return (optional, default 10)
+    
+    Returns list of flashcards for practice.
+    """
+    try:
+        count = int(request.args.get('count', 10))
+        user = User.find_by_id(flask.g.user_id)
+
+        # For now, return random cards as a mock
+        flashcards = get_flashcard_collection()
+
+        # Shuffle and take first 'count' cards
+        random.shuffle(flashcards)
+        practice_cards = flashcards[:count]
+
+        # Add user-specific data (in real implementation, this would come from database)
+        for card in practice_cards:
+            card["user_progress"] = {
+                "repetitions": random.randint(0, 5),
+                "last_practiced": None,
+                "ease_factor": 2.5,
+                "interval": 0
+            }
+
+        log(f"User {user.id} requested practice set of size {count}")
+
+        return json_result({
+            "flashcards": practice_cards,
+            "count": len(practice_cards)
+        })
+
+    except Exception as e:
+        log(f"Get practice set error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
+
+
+@api.route("/verbal_flashcards/submit", methods=["POST"])
+@cross_domain
+@requires_session
+def submit_answer():
+    """
+    Submit an answer for a flashcard and record performance.
+    
+    Expected JSON body:
+    {
+        "flashcard_id": "1",
+        "user_answer": "transcribed text or typed answer",
+        "is_correct": true/false,
+        "answer_source": "speech|typing",
+        "response_time_ms": 5000
+    }
+    
+    Returns updated user progress.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return json_result({"error": "JSON body required"}), 400
+
+        flashcard_id = data.get('flashcard_id')
+        user_answer = data.get('user_answer', '')
+        is_correct = data.get('is_correct')
+        answer_source = data.get('answer_source', 'unknown')
+        response_time = data.get('response_time_ms', 0)
+
+        if not flashcard_id or is_correct is None:
+            return json_result({"error": "flashcard_id and is_correct are required"}), 400
+
+        # Get the flashcard
+        flashcards = get_flashcard_collection()
+        flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
+
+        if not flashcard:
+            return json_result({"error": "Flashcard not found"}), 404
+
+        user = User.find_by_id(flask.g.user_id)
+
+        # Mock response with updated progress
+        new_interval = random.choice([1, 2, 4, 7, 14, 30])
+
+        log(f"User {user.id} answered flashcard {flashcard_id}: correct={is_correct}, source={answer_source}, time={response_time}ms, answer='{user_answer}'")
+
+        return json_result({
+            "success": True,
+            "flashcard_id": flashcard_id,
+            "is_correct": is_correct,
+            "next_review_days": new_interval,
+            "message": "Answer recorded"
+        })
+
+    except Exception as e:
+        log(f"Submit answer error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500

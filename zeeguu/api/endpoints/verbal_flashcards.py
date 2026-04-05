@@ -5,7 +5,6 @@ import os
 import tempfile
 import random
 from flask import request
-from sqlalchemy.exc import NoResultFound
 
 from zeeguu.core.model.user import User
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
@@ -152,7 +151,7 @@ def transcribe_audio(audio_file):
         # Clean up temp file
         os.unlink(temp_path)
 
-        return transcript[0]
+        return transcript[0].text
     except Exception as e:
         log(f"Transcription error: {e}")
         raise
@@ -240,13 +239,6 @@ def get_flashcards():
 
         # Get all flashcards
         flashcards = get_flashcard_collection()
-
-        # Apply filters
-        if category:
-            flashcards = [f for f in flashcards if f['category'].lower() == category.lower()]
-
-        if difficulty:
-            flashcards = [f for f in flashcards if f['difficulty'].lower() == difficulty.lower()]
 
         # Apply pagination
         total = len(flashcards)

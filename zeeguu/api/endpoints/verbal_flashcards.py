@@ -4,6 +4,7 @@ import io
 import os
 import tempfile
 import random
+import re
 from flask import request
 
 from zeeguu.core.model.user import User
@@ -43,8 +44,6 @@ def get_flashcard_collection():
             "prompt": "Hello, how are you?",
             "hint": "Hej, hvordan har du det",
             "expectedText": "hej hvordan har du det",
-            "difficulty": "Beginner",
-            "category": "Greetings",
             "example": "Person A: Hello, how are you? Person B: I'm fine, thanks!",
             "phoneticHint": "hej hvordan har du det"
         },
@@ -53,8 +52,6 @@ def get_flashcard_collection():
             "prompt": "It is really nice weather today",
             "hint": "Det er virkelig godt vejr i dag",
             "expectedText": "det er virkelig godt vejr i dag",
-            "difficulty": "Beginner",
-            "category": "Weather",
             "example": "Let's go for a walk, it is really nice weather today!",
             "phoneticHint": "det er virkelig godt vejr i dag"
         },
@@ -63,8 +60,6 @@ def get_flashcard_collection():
             "prompt": "I want to order a coffee",
             "hint": "Jeg vil gerne bestille en kaffe",
             "expectedText": "jeg vil gerne bestille en kaffe",
-            "difficulty": "Intermediate",
-            "category": "Food & Drink",
             "example": "Excuse me, I want to order a coffee please.",
             "phoneticHint": "jeg vil gerne bestille en kaffe"
         },
@@ -73,8 +68,6 @@ def get_flashcard_collection():
             "prompt": "Can you help me?",
             "hint": "Kan du hjælpe mig?",
             "expectedText": "kan du hjælpe mig",
-            "difficulty": "Beginner",
-            "category": "Requests",
             "example": "I'm lost, can you help me find the station?",
             "phoneticHint": "kan du hjælpe mig"
         },
@@ -83,8 +76,6 @@ def get_flashcard_collection():
             "prompt": "When is the meeting?",
             "hint": "Hvornår er mødet?",
             "expectedText": "hvornår er mødet",
-            "difficulty": "Intermediate",
-            "category": "Work",
             "example": "When is the meeting scheduled for today?",
             "phoneticHint": "hvornår er mødet"
         },
@@ -93,8 +84,6 @@ def get_flashcard_collection():
             "prompt": "Coffee",
             "hint": "kaffe",
             "expectedText": "kaffe",
-            "difficulty": "Beginner",
-            "category": "Food & Drink",
             "example": "I would like a coffee with milk.",
             "phoneticHint": "kaffe"
         },
@@ -103,8 +92,6 @@ def get_flashcard_collection():
             "prompt": "Cake",
             "hint": "kage",
             "expectedText": "kage",
-            "difficulty": "Beginner",
-            "category": "Food & Drink",
             "example": "This cake is delicious!",
             "phoneticHint": "kage"
         },
@@ -113,8 +100,6 @@ def get_flashcard_collection():
             "prompt": "Sausage",
             "hint": "pølse",
             "expectedText": "pølse",
-            "difficulty": "Beginner",
-            "category": "Food & Drink",
             "example": "Danish hot dogs with sausage are famous.",
             "phoneticHint": "pølse"
         }
@@ -124,6 +109,189 @@ def get_flashcard_collection():
 # ====================================
 # Helper Functions
 # ====================================
+def normalize_danish_word(word):
+    """Normalize Danish words for better comparison"""
+    if not word:
+        return ""
+
+    word = word.lower()
+
+    # Handle common Danish spelling variations
+    variations = {
+        'aa': 'å',
+        'ae': 'æ',
+        'oe': 'ø',
+        'hv': 'v',  # "hv" in "hvornår" often sounds like "v"
+    }
+
+    # Replace common variations
+    for pattern, replacement in variations.items():
+        word = word.replace(pattern, replacement)
+
+    # Handle soft D at end of words (common in Danish)
+    if word.endswith('d'):
+        word = word[:-1]
+
+    return word
+
+
+def calculate_accuracy(user_speech, expected_text):
+    """
+    Calculate accuracy between user speech and expected text.
+    Returns detailed accuracy metrics.
+    """
+    user_speech = user_speech.lower().strip() if user_speech else ""
+    expected_text = expected_text.lower().strip() if expected_text else ""
+
+    # Preserve Danish characters while removing punctuation
+    user_speech = re.sub(r'[^\w\sæøåÆØÅ\']', ' ', user_speech)
+    expected_text = re.sub(r'[^\w\sæøåÆØÅ\']', ' ', expected_text)
+
+    # Normalize multiple spaces
+    user_speech = re.sub(r'\s+', ' ', user_speech).strip()
+    expected_text = re.sub(r'\s+', ' ', expected_text).strip()
+
+    user_words = [w for w in user_speech.split() if len(w) > 0]
+    expected_words = [w for w in expected_text.split() if len(w) > 0]
+
+    word_matches = []
+    correct_words = 0
+    correct_positions = 0
+    matched_indices = set()
+
+    # First pass: find exact position matches
+    for i in range(min(len(user_words), len(expected_words))):
+        user_word = user_words[i]
+        expected_word = expected_words[i]
+
+        if (user_word == expected_word or
+                normalize_danish_word(user_word) == normalize_danish_word(expected_word)):
+            correct_words += 1
+            correct_positions += 1
+            matched_indices.add(i)
+            word_matches.append({
+                "word": expected_word,
+                "isCorrect": True,
+                "isInPosition": True,
+                "userWord": user_word,
+                "position": i,
+                "suggestedWord": None
+            })
+
+    # Second pass: find remaining correct words
+    for i in range(len(expected_words)):
+        if any(m.get("position") == i and m.get("isInPosition") for m in word_matches):
+            continue
+
+        expected_word = expected_words[i]
+        found = False
+
+        for j in range(len(user_words)):
+            if j in matched_indices:
+                continue
+
+            user_word = user_words[j]
+
+            if (user_word == expected_word or
+                    normalize_danish_word(user_word) == normalize_danish_word(expected_word)):
+                matched_indices.add(j)
+                correct_words += 1
+                word_matches.append({
+                    "word": expected_word,
+                    "isCorrect": True,
+                    "isInPosition": False,
+                    "userWord": user_word,
+                    "position": i,
+                    "expectedPosition": i,
+                    "actualPosition": j,
+                    "suggestedWord": user_word
+                })
+                found = True
+                break
+
+        if not found:
+            word_matches.append({
+                "word": expected_word,
+                "isCorrect": False,
+                "isInPosition": False,
+                "position": i,
+                "suggestedWord": "?"
+            })
+
+    # Sort word matches by original position
+    word_matches.sort(key=lambda x: x["position"])
+
+    # Calculate accuracies
+    word_accuracy = round((correct_words / len(expected_words)) * 100) if expected_words else 0
+    position_accuracy = round((correct_positions / len(expected_words)) * 100) if expected_words else 0
+    final_accuracy = round((word_accuracy * 0.7) + (position_accuracy * 0.3))
+
+    # Generate feedback
+    feedback = get_feedback_message(final_accuracy, correct_positions, len(expected_words))
+    detailed_analysis = generate_detailed_analysis(final_accuracy, correct_words, correct_positions,
+                                                   len(expected_words), word_matches)
+
+    return {
+        "accuracy": final_accuracy,
+        "wordAccuracy": word_accuracy,
+        "positionAccuracy": position_accuracy,
+        "feedback": feedback,
+        "wordMatches": word_matches,
+        "detailedAnalysis": detailed_analysis
+    }
+
+
+def get_feedback_message(accuracy, correct_positions, total_words):
+    """Generate appropriate feedback message based on accuracy"""
+    if accuracy >= 95:
+        return "Excellent! Totally perfect! 🌟"
+    if accuracy >= 85:
+        return "Great! Almost perfect! ✨"
+    if accuracy >= 70:
+        if correct_positions == total_words:
+            return "Nice job! The words are in the right order! 👍"
+        else:
+            return "Nice job! Try to focus on word order 🎯"
+    if accuracy >= 50:
+        if correct_positions < total_words / 2:
+            return "Not bad! Remember, word order is very important in danish 📝"
+        else:
+            return "Not bad! Keep practicing! 💪"
+    if accuracy >= 30:
+        return "Keep going! Try again 📚"
+    if accuracy >= 10:
+        return "Start slowly, say every word clearly 🗣️"
+    return "Try again, take your time with each word 💪"
+
+
+def generate_detailed_analysis(final_accuracy, correct_words, correct_positions, total_words, word_matches):
+    """Generate detailed analysis of pronunciation"""
+    if total_words == 0:
+        return "No words to compare"
+
+    incorrect_words = [w for w in word_matches if not w.get("isCorrect", False)]
+    out_of_position_words = [w for w in word_matches if w.get("isCorrect", False) and not w.get("isInPosition", False)]
+
+    if len(incorrect_words) == 0 and len(out_of_position_words) == 0:
+        return f"Perfect! All {total_words} words are pronunced correctly and in the right order! 🎉"
+
+    if len(incorrect_words) == 0 and len(out_of_position_words) > 0:
+        if len(out_of_position_words) == 1:
+            return f"You pronunced every word correctly, but 1 word is in the wrong place: '{out_of_position_words[0]['word']}' should be at position {out_of_position_words[0]['position'] + 1}. Focus on word order! 📝"
+        else:
+            words_str = ", ".join([f"'{w['word']}'" for w in out_of_position_words])
+            return f"You pronunced every word correctly, but {len(out_of_position_words)} words are in the wrong place: {words_str}. Focus on word order! 📝"
+
+    if len(incorrect_words) == 1:
+        return f"Almost perfect! Only one word to work on: '{incorrect_words[0]['word']}'"
+
+    problem_words = ", ".join([f"'{w['word']}'" for w in incorrect_words[:3]])
+    if len(incorrect_words) > 3:
+        return f"You got {correct_words} out of {total_words} words correct. {correct_positions} of them were in the right place. Focus on: {problem_words} and {len(incorrect_words) - 3} more"
+
+    return f"You got {correct_words} out of {total_words} words correctly. {correct_positions} of them were in the right place. Focus on: {problem_words}"
+
+
 def transcribe_audio(audio_file):
     """
     Transcribe audio file using the ASR model.
@@ -220,11 +388,9 @@ def transcribe_audio_endpoint():
 @requires_session
 def get_flashcards():
     """
-    Get flashcards, optionally filtered by category and difficulty.
+    Get flashcards.
     
     Query parameters:
-    - category: filter by category (optional)
-    - difficulty: filter by difficulty (optional)
     - limit: max number of cards to return (optional, default 50)
     - offset: pagination offset (optional, default 0)
     
@@ -232,8 +398,6 @@ def get_flashcards():
     """
     try:
         # Get query parameters
-        category = request.args.get('category')
-        difficulty = request.args.get('difficulty')
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
 
@@ -242,14 +406,14 @@ def get_flashcards():
 
         # Apply pagination
         total = len(flashcards)
-        flashcards = flashcards[offset:offset + limit]
+        paginated = flashcards[offset:offset + limit]
 
         # Log user activity
         user = User.find_by_id(flask.g.user_id)
-        log(f"User {user.id} requested flashcards with filters: category={category}, difficulty={difficulty}")
+        log(f"User {user.id} requested flashcards")
 
         return json_result({
-            "flashcards": flashcards,
+            "flashcards": paginated,
             "total": total,
             "limit": limit,
             "offset": offset
@@ -285,48 +449,6 @@ def get_flashcard_by_id(flashcard_id):
 
     except Exception as e:
         log(f"Get flashcard error: {e}")
-        traceback.print_exc()
-        return json_result({"error": str(e)}), 500
-
-
-@api.route("/verbal_flashcards/categories", methods=["GET"])
-@cross_domain
-@requires_session
-def get_categories():
-    """
-    Get all available categories with counts and difficulties.
-    
-    Returns list of categories with metadata.
-    """
-    try:
-        flashcards = get_flashcard_collection()
-
-        # Group by category
-        categories = {}
-        for card in flashcards:
-            cat = card['category']
-            if cat not in categories:
-                categories[cat] = {
-                    "name": cat,
-                    "count": 0,
-                    "difficulties": set()
-                }
-            categories[cat]["count"] += 1
-            categories[cat]["difficulties"].add(card['difficulty'])
-
-        # Convert sets to lists
-        result = []
-        for cat in categories.values():
-            cat["difficulties"] = list(cat["difficulties"])
-            result.append(cat)
-
-        # Sort by name
-        result.sort(key=lambda x: x["name"])
-
-        return json_result(result)
-
-    except Exception as e:
-        log(f"Get categories error: {e}")
         traceback.print_exc()
         return json_result({"error": str(e)}), 500
 
@@ -393,7 +515,7 @@ def submit_answer():
         "response_time_ms": 5000
     }
     
-    Returns updated user progress.
+    Returns updated user progress and accuracy analysis.
     """
     try:
         data = request.get_json()
@@ -418,20 +540,70 @@ def submit_answer():
 
         user = User.find_by_id(flask.g.user_id)
 
+        # Calculate accuracy analysis if user_answer is provided
+        accuracy_analysis = None
+        if user_answer and not is_correct:  # Calculate even for correct answers to provide feedback
+            expected_text = flashcard.get('expectedText', flashcard['prompt'])
+            accuracy_analysis = calculate_accuracy(user_answer, expected_text)
+
+            # Override is_correct based on accuracy if needed
+            if accuracy_analysis['accuracy'] >= 70:
+                is_correct = True
+
         # Mock response with updated progress
-        new_interval = random.choice([1, 2, 4, 7, 14, 30])
+        new_interval = random.choice([1, 2, 4, 7, 14, 30]) if is_correct else 1
 
         log(f"User {user.id} answered flashcard {flashcard_id}: correct={is_correct}, source={answer_source}, time={response_time}ms, answer='{user_answer}'")
 
-        return json_result({
+        response_data = {
             "success": True,
             "flashcard_id": flashcard_id,
             "is_correct": is_correct,
             "next_review_days": new_interval,
             "message": "Answer recorded"
-        })
+        }
+
+        if accuracy_analysis:
+            response_data["accuracy_analysis"] = accuracy_analysis
+
+        return json_result(response_data)
 
     except Exception as e:
         log(f"Submit answer error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
+
+
+@api.route("/verbal_flashcards/check_pronunciation", methods=["POST"])
+@cross_domain
+@requires_session
+def check_pronunciation():
+    """
+    Check pronunciation of user's speech against expected text.
+    Returns accuracy analysis without storing progress.
+    
+    Expected JSON body:
+    {
+        "user_speech": "transcribed text",
+        "expected_text": "expected phrase"
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return json_result({"error": "JSON body required"}), 400
+
+        user_speech = data.get('user_speech', '')
+        expected_text = data.get('expected_text', '')
+
+        if not user_speech or not expected_text:
+            return json_result({"error": "user_speech and expected_text are required"}), 400
+
+        accuracy_analysis = calculate_accuracy(user_speech, expected_text)
+
+        return json_result(accuracy_analysis)
+
+    except Exception as e:
+        log(f"Check pronunciation error: {e}")
         traceback.print_exc()
         return json_result({"error": str(e)}), 500

@@ -313,13 +313,30 @@ def transcribe_audio(audio_file):
             temp_path = temp_file.name
             audio.export(temp_path, format="wav")
 
-        # Transcribe
         transcript = asr_model.transcribe([temp_path])
 
         # Clean up temp file
         os.unlink(temp_path)
 
-        return transcript[0].text
+        # TODO: research what type is expected from parakeet asr
+
+        if isinstance(transcript, tuple) and len(transcript) == 2:
+            transcript = transcript[0]
+
+        first = transcript[0]
+
+        if hasattr(first, "text"):
+            return first.text
+        if isinstance(first, str):
+            return first
+        if isinstance(first, list) and first:
+            inner = first[0]
+            if hasattr(inner, "text"):
+                return inner.text
+            if isinstance(inner, str):
+                return inner
+
+        raise TypeError(f"Unexpected transcription output: {type(transcript)} / {type(first)}")
     except Exception as e:
         log(f"Transcription error: {e}")
         raise

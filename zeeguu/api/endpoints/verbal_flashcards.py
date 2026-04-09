@@ -3,11 +3,12 @@ import flask
 import io
 import os
 import tempfile
-import random
 import re
 from flask import request
 
 from zeeguu.core.model.user import User
+from zeeguu.core.model.exercise_outcome import ExerciseOutcome
+from zeeguu.core.word_scheduling.basicSR.basicSR import BasicSRSchedule
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
 from . import api, db_session
@@ -33,77 +34,52 @@ except Exception as e:
     log(f"Failed to load ASR model: {e}")
 
 
-# ====================================
-# Mock Flashcard Data (replace with database later)
-# ====================================
-def get_flashcard_collection():
-    """Return the flashcard collection - replace with database query later"""
-    return [
-        {
-            "id": "1",
-            "prompt": "Hello, how are you?",
-            "hint": "Hej, hvordan har du det",
-            "expectedText": "hej hvordan har du det",
-            "example": "Person A: Hello, how are you? Person B: I'm fine, thanks!",
-            "phoneticHint": "hej hvordan har du det"
-        },
-        {
-            "id": "2",
-            "prompt": "It is really nice weather today",
-            "hint": "Det er virkelig godt vejr i dag",
-            "expectedText": "det er virkelig godt vejr i dag",
-            "example": "Let's go for a walk, it is really nice weather today!",
-            "phoneticHint": "det er virkelig godt vejr i dag"
-        },
-        {
-            "id": "3",
-            "prompt": "I want to order a coffee",
-            "hint": "Jeg vil gerne bestille en kaffe",
-            "expectedText": "jeg vil gerne bestille en kaffe",
-            "example": "Excuse me, I want to order a coffee please.",
-            "phoneticHint": "jeg vil gerne bestille en kaffe"
-        },
-        {
-            "id": "4",
-            "prompt": "Can you help me?",
-            "hint": "Kan du hjælpe mig?",
-            "expectedText": "kan du hjælpe mig",
-            "example": "I'm lost, can you help me find the station?",
-            "phoneticHint": "kan du hjælpe mig"
-        },
-        {
-            "id": "5",
-            "prompt": "When is the meeting?",
-            "hint": "Hvornår er mødet?",
-            "expectedText": "hvornår er mødet",
-            "example": "When is the meeting scheduled for today?",
-            "phoneticHint": "hvornår er mødet"
-        },
-        {
-            "id": "6",
-            "prompt": "Coffee",
-            "hint": "kaffe",
-            "expectedText": "kaffe",
-            "example": "I would like a coffee with milk.",
-            "phoneticHint": "kaffe"
-        },
-        {
-            "id": "7",
-            "prompt": "Cake",
-            "hint": "kage",
-            "expectedText": "kage",
-            "example": "This cake is delicious!",
-            "phoneticHint": "kage"
-        },
-        {
-            "id": "8",
-            "prompt": "Sausage",
-            "hint": "pølse",
-            "expectedText": "pølse",
-            "example": "Danish hot dogs with sausage are famous.",
-            "phoneticHint": "pølse"
-        }
-    ]
+VERBAL_FLASHCARD_EXERCISE_SOURCE = "Verbal Flashcards"
+
+
+def _verbal_flashcard_from_user_word(user_word):
+    bookmark = user_word.preferred_bookmark
+    if not bookmark:
+        return None
+
+    prompt = user_word.meaning.origin.content
+    answer = user_word.meaning.translation.content
+
+    if not prompt or not answer:
+        return None
+
+    return {
+        "id": str(bookmark.id),
+        "bookmark_id": bookmark.id,
+        "user_word_id": user_word.id,
+        "level": user_word.level,
+        "prompt": prompt,
+        "answer": answer,
+        "expectedText": answer,
+    }
+
+
+def get_flashcard_collection(user):
+    """
+    Return level-3+ Zeeguu study words as minimal verbal flashcards.
+    """
+    user_words = BasicSRSchedule.user_words_to_study(user)
+    flashcards = []
+
+    for user_word in user_words:
+        if (user_word.level or 0) < 3:
+            continue
+
+        try:
+            card = _verbal_flashcard_from_user_word(user_word)
+        except Exception as e:
+            log(f"Skipping verbal flashcard for user_word {user_word.id}: {e}")
+            continue
+
+        if card:
+            flashcards.append(card)
+
+    return flashcards
 
 
 # ====================================
@@ -381,7 +357,8 @@ def transcribe_audio_endpoint():
         # Get flashcard info if requested
         flashcard = None
         if flashcard_id:
-            flashcards = get_flashcard_collection()
+            user = User.find_by_id(flask.g.user_id)
+            flashcards = get_flashcard_collection(user)
             flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
 
         # Log user activity
@@ -419,14 +396,14 @@ def get_flashcards():
         offset = int(request.args.get('offset', 0))
 
         # Get all flashcards
-        flashcards = get_flashcard_collection()
+        user = User.find_by_id(flask.g.user_id)
+        flashcards = get_flashcard_collection(user)
 
         # Apply pagination
         total = len(flashcards)
         paginated = flashcards[offset:offset + limit]
 
         # Log user activity
-        user = User.find_by_id(flask.g.user_id)
         log(f"User {user.id} requested flashcards")
 
         return json_result({
@@ -452,14 +429,14 @@ def get_flashcard_by_id(flashcard_id):
     Returns the flashcard object.
     """
     try:
-        flashcards = get_flashcard_collection()
+        user = User.find_by_id(flask.g.user_id)
+        flashcards = get_flashcard_collection(user)
         flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
 
         if not flashcard:
             return json_result({"error": "Flashcard not found"}), 404
 
         # Log user activity
-        user = User.find_by_id(flask.g.user_id)
         log(f"User {user.id} requested flashcard {flashcard_id}")
 
         return json_result(flashcard)
@@ -487,21 +464,8 @@ def get_practice_set():
         count = int(request.args.get('count', 10))
         user = User.find_by_id(flask.g.user_id)
 
-        # For now, return random cards as a mock
-        flashcards = get_flashcard_collection()
-
-        # Shuffle and take first 'count' cards
-        random.shuffle(flashcards)
+        flashcards = get_flashcard_collection(user)
         practice_cards = flashcards[:count]
-
-        # Add user-specific data (in real implementation, this would come from database)
-        for card in practice_cards:
-            card["user_progress"] = {
-                "repetitions": random.randint(0, 5),
-                "last_practiced": None,
-                "ease_factor": 2.5,
-                "interval": 0
-            }
 
         log(f"User {user.id} requested practice set of size {count}")
 
@@ -529,7 +493,8 @@ def submit_answer():
         "user_answer": "transcribed text or typed answer",
         "is_correct": true/false,
         "answer_source": "speech|typing",
-        "response_time_ms": 5000
+        "response_time_ms": 5000,
+        "session_id": 123
     }
     
     Returns updated user progress and accuracy analysis.
@@ -539,36 +504,61 @@ def submit_answer():
         if not data:
             return json_result({"error": "JSON body required"}), 400
 
-        flashcard_id = data.get('flashcard_id')
+        flashcard_id = str(data.get('flashcard_id')) if data.get('flashcard_id') is not None else None
         user_answer = data.get('user_answer', '')
         is_correct = data.get('is_correct')
         answer_source = data.get('answer_source', 'unknown')
         response_time = data.get('response_time_ms', 0)
+        session_id = data.get('session_id')
 
         if not flashcard_id or is_correct is None:
             return json_result({"error": "flashcard_id and is_correct are required"}), 400
 
-        # Get the flashcard
-        flashcards = get_flashcard_collection()
+        user = User.find_by_id(flask.g.user_id)
+        flashcards = get_flashcard_collection(user)
         flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
 
         if not flashcard:
             return json_result({"error": "Flashcard not found"}), 404
 
-        user = User.find_by_id(flask.g.user_id)
+        if session_id is not None:
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                return json_result({"error": "session_id must be an integer"}), 400
+
+        try:
+            response_time = int(response_time)
+        except (TypeError, ValueError):
+            response_time = 0
 
         # Calculate accuracy analysis if user_answer is provided
         accuracy_analysis = None
-        if user_answer and not is_correct:  # Calculate even for correct answers to provide feedback
-            expected_text = flashcard.get('expectedText', flashcard['prompt'])
+        if user_answer:
+            expected_text = flashcard["expectedText"]
             accuracy_analysis = calculate_accuracy(user_answer, expected_text)
 
             # Override is_correct based on accuracy if needed
             if accuracy_analysis['accuracy'] >= 70:
                 is_correct = True
 
-        # Mock response with updated progress
-        new_interval = random.choice([1, 2, 4, 7, 14, 30]) if is_correct else 1
+        exercise_outcome = ExerciseOutcome.CORRECT if is_correct else ExerciseOutcome.WRONG
+        other_feedback = f"answer_source={answer_source}"
+        flashcard_user_word_id = flashcard["user_word_id"]
+
+        from zeeguu.core.model.user_word import UserWord
+        user_word = UserWord.query.get(flashcard_user_word_id)
+        if not user_word or user_word.user_id != user.id:
+            return json_result({"error": "Flashcard not found"}), 404
+
+        user_word.report_exercise_outcome(
+            db_session,
+            VERBAL_FLASHCARD_EXERCISE_SOURCE,
+            exercise_outcome,
+            response_time,
+            session_id,
+            other_feedback,
+        )
 
         log(f"User {user.id} answered flashcard {flashcard_id}: correct={is_correct}, source={answer_source}, time={response_time}ms, answer='{user_answer}'")
 
@@ -576,7 +566,7 @@ def submit_answer():
             "success": True,
             "flashcard_id": flashcard_id,
             "is_correct": is_correct,
-            "next_review_days": new_interval,
+            "exercise_outcome": exercise_outcome,
             "message": "Answer recorded"
         }
 

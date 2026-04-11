@@ -1,8 +1,8 @@
 import datetime
 
-from MySQLdb import IntegrityError
 import sqlalchemy
 from sqlalchemy import Column, Integer, ForeignKey, Boolean, DateTime
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import relationship
 
 from zeeguu.core.model import User

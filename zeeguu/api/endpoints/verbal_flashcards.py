@@ -126,45 +126,55 @@ FUZZY_ACCEPTANCE_BUFFER = 0.08
 
 
 
-def normalize_danish_word(word, asr_friendly=False):
+def canonical_danish_form(word):
     """
-    Normalize Danish words for comparison.
+    Normalize a word into a canonical written Danish form.
 
-    The canonical form keeps Danish letters. The ASR-friendly form folds
-    Danish vowels to nearby ASCII vowels so transcripts like 'tre' can still
-    match expected forms like 'træ'.
+    This keeps Danish letters intact and only collapses common alternate
+    spellings into their standard written forms.
     """
     if not word:
         return ""
 
     word = unicodedata.normalize("NFC", str(word).casefold())
 
-    # Handle common Danish spelling variations.
-    variations = {
+    spelling_variants = {
         'aa': 'å',
         'ae': 'æ',
         'oe': 'ø',
-        'hv': 'v',  # "hv" in "hvornår" often sounds like "v"
     }
 
-    for pattern, replacement in variations.items():
+    for pattern, replacement in spelling_variants.items():
         word = word.replace(pattern, replacement)
 
-    # Common silent endings in Danish ASR transcripts.
+    return word
+
+
+def asr_tolerant_danish_form(word):
+    """
+    Fold a word into a more ASR-tolerant comparison form.
+
+    This starts from the canonical written form, then applies permissive
+    simplifications that help match common ASR spellings to the expected word.
+    """
+    word = canonical_danish_form(word)
+
+    if word.startswith('hv'):
+        word = 'v' + word[2:]
+
     if word.endswith('d'):
         word = word[:-1]
     if word.endswith('g'):
         word = word[:-1]
 
-    if asr_friendly:
-        asr_variations = {
-            'æ': 'e',
-            'ø': 'o',
-            'å': 'a',
-        }
+    asr_variants = {
+        'æ': 'e',
+        'ø': 'o',
+        'å': 'a',
+    }
 
-        for pattern, replacement in asr_variations.items():
-            word = word.replace(pattern, replacement)
+    for pattern, replacement in asr_variants.items():
+        word = word.replace(pattern, replacement)
 
     return word
 
@@ -310,7 +320,7 @@ def boundary_aware_jaro_winkler_similarity(source, target):
 
 def fuzzy_match_threshold(expected_word):
     """Length-aware thresholds tuned for short flashcard answers."""
-    normalized_length = len(normalize_danish_word(expected_word))
+    normalized_length = len(canonical_danish_form(expected_word))
 
     if normalized_length <= 2:
         return 1.0
@@ -327,10 +337,10 @@ def score_word_match(user_word, expected_word):
     user_word = user_word or ""
     expected_word = expected_word or ""
 
-    normalized_user_word = normalize_danish_word(user_word)
-    normalized_expected_word = normalize_danish_word(expected_word)
-    asr_user_word = normalize_danish_word(user_word, asr_friendly=True)
-    asr_expected_word = normalize_danish_word(expected_word, asr_friendly=True)
+    normalized_user_word = canonical_danish_form(user_word)
+    normalized_expected_word = canonical_danish_form(expected_word)
+    asr_user_word = asr_tolerant_danish_form(user_word)
+    asr_expected_word = asr_tolerant_danish_form(expected_word)
 
     if user_word == expected_word:
         return {

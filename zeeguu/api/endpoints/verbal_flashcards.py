@@ -4,6 +4,7 @@ import io
 import os
 import tempfile
 import re
+from datetime import datetime
 from flask import request
 from sqlalchemy.orm import joinedload
 
@@ -14,6 +15,7 @@ from zeeguu.core.model.phrase import Phrase
 from zeeguu.core.model.bookmark import Bookmark
 from zeeguu.core.model.exercise_outcome import ExerciseOutcome
 from zeeguu.core.word_scheduling.basicSR.basicSR import BasicSRSchedule
+from zeeguu.core.word_scheduling.basicSR.four_levels_per_word import FourLevelsPerWord
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
 from . import api, db_session
@@ -113,6 +115,25 @@ def get_flashcard_collection(user):
             flashcards.append(card)
 
     return flashcards
+
+
+def _ensure_schedule_for_verbal_flashcard(user_word):
+    """
+    Verbal flashcards can target higher-level words that are not currently in the
+    standard exercise pipeline. Create a schedule row without resetting the level
+    so the word appears in /words after it is practiced.
+    """
+    schedule = FourLevelsPerWord.find(user_word)
+    if schedule:
+        return schedule
+
+    schedule = FourLevelsPerWord(user_word=user_word)
+    schedule.next_practice_time = datetime.now()
+    schedule.consecutive_correct_answers = 0
+    schedule.cooling_interval = 0
+    db_session.add(schedule)
+    db_session.commit()
+    return schedule
 
 
 # ====================================
@@ -583,6 +604,8 @@ def submit_answer():
         user_word = UserWord.query.get(flashcard_user_word_id)
         if not user_word or user_word.user_id != user.id:
             return json_result({"error": "Flashcard not found"}), 404
+
+        _ensure_schedule_for_verbal_flashcard(user_word)
 
         user_word.report_exercise_outcome(
             db_session,

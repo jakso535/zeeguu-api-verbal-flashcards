@@ -13,7 +13,7 @@ git config --local core.hooksPath .githooks/
 # Step 1: Check/install uv
 if ! command -v uv &> /dev/null; then
     echo "[1/6] Installing uv..."
-    brew install uv
+    pip install uv
 else
     echo "[1/6] uv found: $(uv --version)"
 fi
@@ -21,7 +21,7 @@ fi
 # Step 2: Install mysql-client (needed for mysqlclient pip package)
 if [ ! -f /opt/homebrew/opt/mysql-client/include/mysql/mysql.h ]; then
     echo "[2/6] Installing mysql-client via Homebrew..."
-    brew install mysql-client
+    pip install mysql-client
 else
     echo "[2/6] mysql-client already installed"
 fi

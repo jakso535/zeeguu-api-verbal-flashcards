@@ -30,9 +30,9 @@ def test_verbal_flashcards_only_returns_level_3_plus_words(client):
     assert flashcards["total"] == 1
     assert len(flashcards["flashcards"]) == 1
     assert flashcards["flashcards"][0]["bookmark_id"] == bookmark_id
-    assert flashcards["flashcards"][0]["prompt"] == bookmark.user_word.meaning.origin.content
-    assert flashcards["flashcards"][0]["answer"] == bookmark.user_word.meaning.translation.content
-    assert flashcards["flashcards"][0]["expectedText"] == bookmark.user_word.meaning.translation.content
+    assert flashcards["flashcards"][0]["prompt"] == bookmark.user_word.meaning.translation.content
+    assert flashcards["flashcards"][0]["answer"] == bookmark.user_word.meaning.origin.content
+    assert flashcards["flashcards"][0]["expectedText"] == bookmark.user_word.meaning.origin.content
 
 
 def test_verbal_flashcards_submit_reports_exercise_outcome(client):
@@ -53,7 +53,7 @@ def test_verbal_flashcards_submit_reports_exercise_outcome(client):
         "/verbal_flashcards/submit",
         json={
             "flashcard_id": str(bookmark_id),
-            "user_answer": bookmark.user_word.meaning.translation.content,
+            "user_answer": bookmark.user_word.meaning.origin.content,
             "is_correct": True,
             "answer_source": "speech",
             "response_time_ms": 1500,

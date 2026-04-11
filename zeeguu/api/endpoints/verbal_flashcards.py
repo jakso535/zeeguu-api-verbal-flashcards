@@ -5,8 +5,13 @@ import os
 import tempfile
 import re
 from flask import request
+from sqlalchemy.orm import joinedload
 
 from zeeguu.core.model.user import User
+from zeeguu.core.model.user_word import UserWord
+from zeeguu.core.model.meaning import Meaning
+from zeeguu.core.model.phrase import Phrase
+from zeeguu.core.model.bookmark import Bookmark
 from zeeguu.core.model.exercise_outcome import ExerciseOutcome
 from zeeguu.core.word_scheduling.basicSR.basicSR import BasicSRSchedule
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
@@ -42,8 +47,8 @@ def _verbal_flashcard_from_user_word(user_word):
     if not bookmark:
         return None
 
-    prompt = user_word.meaning.origin.content
-    answer = user_word.meaning.translation.content
+    prompt = user_word.meaning.translation.content
+    answer = user_word.meaning.origin.content
 
     if not prompt or not answer:
         return None
@@ -63,11 +68,38 @@ def get_flashcard_collection(user):
     """
     Return level-3+ Zeeguu study words as minimal verbal flashcards.
     """
-    user_words = BasicSRSchedule.user_words_to_study(user)
+    user_words = (
+        UserWord.query
+        .options(
+            joinedload(UserWord.meaning).joinedload(Meaning.origin).joinedload(Phrase.language),
+            joinedload(UserWord.meaning).joinedload(Meaning.translation).joinedload(Phrase.language),
+            joinedload(UserWord.preferred_bookmark).joinedload(Bookmark.text),
+            joinedload(UserWord.preferred_bookmark).joinedload(Bookmark.context),
+            joinedload(UserWord.preferred_bookmark).joinedload(Bookmark.source),
+        )
+        .outerjoin(BasicSRSchedule, BasicSRSchedule.user_word_id == UserWord.id)
+        .join(Meaning, UserWord.meaning_id == Meaning.id)
+        .join(Phrase, Meaning.origin_id == Phrase.id)
+        .filter(UserWord.user_id == user.id)
+        .filter(UserWord.learned_time == None)
+        .filter(UserWord.fit_for_study == 1)
+        .filter(UserWord.level >= 3)
+        .filter(UserWord.preferred_bookmark_id != None)
+        .filter(Phrase.language_id == user.learned_language_id)
+        .order_by(
+            Phrase.rank.is_(None),
+            Phrase.rank.asc(),
+            BasicSRSchedule.next_practice_time.is_(None),
+            BasicSRSchedule.next_practice_time.asc(),
+        )
+        .all()
+    )
     flashcards = []
+    seen_words = set()
 
     for user_word in user_words:
-        if (user_word.level or 0) < 3:
+        word_text = user_word.meaning.origin.content.lower()
+        if word_text in seen_words:
             continue
 
         try:
@@ -77,6 +109,7 @@ def get_flashcard_collection(user):
             continue
 
         if card:
+            seen_words.add(word_text)
             flashcards.append(card)
 
     return flashcards

@@ -17,6 +17,9 @@ from zeeguu.core.model.bookmark import Bookmark
 from zeeguu.core.model.exercise_outcome import ExerciseOutcome
 from zeeguu.core.word_scheduling.basicSR.basicSR import BasicSRSchedule
 from zeeguu.core.word_scheduling.basicSR.four_levels_per_word import FourLevelsPerWord
+from zeeguu.core.exercises.verbal_flashcard_seeding import (
+    seed_verbal_flashcards_for_user,
+)
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
 from . import api, db_session
@@ -676,6 +679,50 @@ def get_flashcards():
 
     except Exception as e:
         log(f"Get flashcards error: {e}")
+        traceback.print_exc()
+        return json_result({"error": str(e)}), 500
+
+
+@api.route("/verbal_flashcards/reseed", methods=["POST"])
+@cross_domain
+@requires_session
+def reseed_flashcards():
+    """
+    Seed the logged-in user with simple Danish verbal-flashcard words.
+
+    Expected JSON body:
+    {
+        "count": 20
+    }
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        count = int(payload.get("count", 20))
+
+        if count <= 0:
+            return json_result({"error": "count must be positive"}), 400
+
+        user = User.find_by_id(flask.g.user_id)
+        result = seed_verbal_flashcards_for_user(db_session, user, count=count)
+
+        log(
+            f"User {user.id} reseeded verbal flashcards: "
+            f"{result['seeded_count']} new, {result['refreshed_count']} refreshed"
+        )
+
+        return json_result(
+            {
+                "success": True,
+                "count": count,
+                **result,
+            }
+        )
+
+    except ValueError:
+        return json_result({"error": "count must be an integer"}), 400
+    except Exception as e:
+        db_session.rollback()
+        log(f"Reseed flashcards error: {e}")
         traceback.print_exc()
         return json_result({"error": str(e)}), 500
 

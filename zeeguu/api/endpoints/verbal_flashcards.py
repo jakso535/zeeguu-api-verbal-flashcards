@@ -4,13 +4,9 @@ import re
 import unicodedata
 from datetime import datetime
 from flask import request, Response
-from sqlalchemy.orm import joinedload
 
 from zeeguu.core.model.user import User
 from zeeguu.core.model.user_word import UserWord
-from zeeguu.core.model.meaning import Meaning
-from zeeguu.core.model.phrase import Phrase
-from zeeguu.core.model.bookmark import Bookmark
 from zeeguu.core.model.exercise_outcome import ExerciseOutcome
 from zeeguu.core.word_scheduling.basicSR.basicSR import BasicSRSchedule
 from zeeguu.core.word_scheduling.basicSR.four_levels_per_word import FourLevelsPerWord
@@ -75,7 +71,6 @@ def _empty_asr_stats_for_user(user, failure_reason=None):
             "total_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
-            "mock_requests": 0,
             "last_request_at": None,
         },
         "last_request_metrics": None,
@@ -127,7 +122,6 @@ def get_asr_stats_for_user(user):
             "total_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
-            "mock_requests": 0,
             "last_request_at": None,
         },
         "last_request_metrics": worker_stats.get("last_request_metrics"),
@@ -548,13 +542,7 @@ def calculate_accuracy(user_speech, expected_text):
     accepted_accuracy = round((accepted_words / len(expected_words)) * 100) if expected_words else 0
     is_accepted = bool(expected_words) and accepted_words == len(expected_words)
 
-    feedback = get_feedback_message(word_accuracy, accepted_words, len(expected_words))
-    detailed_analysis = generate_detailed_analysis(
-        word_accuracy,
-        accepted_words,
-        len(expected_words),
-        word_matches,
-    )
+    feedback = get_feedback_message(accepted_words, len(expected_words))
 
     return {
         "accuracy": word_accuracy,
@@ -564,21 +552,14 @@ def calculate_accuracy(user_speech, expected_text):
         "isAccepted": is_accepted,
         "feedback": feedback,
         "wordMatches": word_matches,
-        "detailedAnalysis": detailed_analysis,
     }
 
 
-
-def get_feedback_message(accuracy, accepted_words, total_words):
+def get_feedback_message(accepted_words, total_words):
     """Return one of the two simplified feedback outcomes for verbal flashcards."""
     if total_words and accepted_words == total_words:
         return "Success"
     return "Very close, try again"
-
-
-def generate_detailed_analysis(final_accuracy, correct_words, total_words, word_matches):
-    """Hide detailed feedback so the UI only shows the simplified main message."""
-    return ""
 
 
 def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
@@ -599,7 +580,6 @@ def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
     request_metrics = dict(transcription_result.get("request_metrics") or {})
     request_metrics.setdefault("language_code", language_code)
     request_metrics.setdefault("flashcard_id", flashcard_id)
-    request_metrics.setdefault("used_mock_transcription", False)
 
     return {
         "transcription": transcription_result.get("transcription", ""),
@@ -625,7 +605,7 @@ def transcribe_audio_endpoint():
     Returns:
     {
         "transcription": "transcribed text",
-        "flashcard": {...}  # if flashcard_id provided
+        "request_metrics": {...}
     }
     """
     try:
@@ -656,19 +636,12 @@ def transcribe_audio_endpoint():
             transcription = transcription_result
             request_metrics = None
 
-        # Get flashcard info if requested
-        flashcard = None
-        if flashcard_id:
-            flashcards = get_flashcard_collection(user)
-            flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
-
         # Log user activity
         log(f"User {user.id} transcribed audio for flashcard {flashcard_id}")
 
         return json_result({
             "success": True,
             "transcription": transcription,
-            "flashcard": flashcard,
             "request_metrics": request_metrics,
         })
 
@@ -820,10 +793,6 @@ def verbal_flashcards_asr_metrics():
         "# TYPE verbal_flashcards_asr_requests_failed_total counter",
         f"verbal_flashcards_asr_requests_failed_total {request_counts.get('failed_requests', 0)}",
         "",
-        "# HELP verbal_flashcards_asr_requests_mock_total Mock ASR transcription requests",
-        "# TYPE verbal_flashcards_asr_requests_mock_total counter",
-        f"verbal_flashcards_asr_requests_mock_total {request_counts.get('mock_requests', 0)}",
-        "",
         "# HELP verbal_flashcards_asr_last_request_duration_ms Duration of the most recent ASR request",
         "# TYPE verbal_flashcards_asr_last_request_duration_ms gauge",
         f"verbal_flashcards_asr_last_request_duration_ms {last_request.get('request_duration_ms') or 0}",
@@ -838,68 +807,6 @@ def verbal_flashcards_asr_metrics():
     ]
 
     return Response("\n".join(lines) + "\n", mimetype="text/plain")
-
-
-@api.route("/verbal_flashcards/<flashcard_id>", methods=["GET"])
-@cross_domain
-@requires_session
-def get_flashcard_by_id(flashcard_id):
-    """
-    Get a single flashcard by ID.
-    
-    Returns the flashcard object.
-    """
-    try:
-        user = User.find_by_id(flask.g.user_id)
-        flashcards = get_flashcard_collection(user)
-        flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
-
-        if not flashcard:
-            return json_result({"error": "Flashcard not found"}), 404
-
-        # Log user activity
-        log(f"User {user.id} requested flashcard {flashcard_id}")
-
-        return json_result(flashcard)
-
-    except Exception as e:
-        log(f"Get flashcard error: {e}")
-        traceback.print_exc()
-        return json_result({"error": str(e)}), 500
-
-
-@api.route("/verbal_flashcards/practice", methods=["GET"])
-@cross_domain
-@requires_session
-def get_practice_set():
-    """
-    Get a set of flashcards for practice.
-    Uses spaced repetition to select appropriate cards.
-    
-    Query parameters:
-    - count: number of cards to return (optional, default 10)
-    
-    Returns list of flashcards for practice.
-    """
-    try:
-        count = int(request.args.get('count', 10))
-        user = User.find_by_id(flask.g.user_id)
-
-        flashcards = get_flashcard_collection(user)
-        practice_cards = flashcards[:count]
-
-        log(f"User {user.id} requested practice set of size {count}")
-
-        return json_result({
-            "flashcards": practice_cards,
-            "count": len(practice_cards)
-        })
-
-    except Exception as e:
-        log(f"Get practice set error: {e}")
-        traceback.print_exc()
-        return json_result({"error": str(e)}), 500
-
 
 @api.route("/verbal_flashcards/submit", methods=["POST"])
 @cross_domain
@@ -967,7 +874,6 @@ def submit_answer():
         other_feedback = f"answer_source={answer_source}"
         flashcard_user_word_id = flashcard["user_word_id"]
 
-        from zeeguu.core.model.user_word import UserWord
         user_word = UserWord.query.get(flashcard_user_word_id)
         if not user_word or user_word.user_id != user.id:
             return json_result({"error": "Flashcard not found"}), 404

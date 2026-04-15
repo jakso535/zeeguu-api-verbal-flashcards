@@ -38,7 +38,6 @@ _request_stats = {
     "total_requests": 0,
     "successful_requests": 0,
     "failed_requests": 0,
-    "mock_requests": 0,
     "last_request_at": None,
 }
 _last_request_metrics = None
@@ -244,7 +243,6 @@ def transcribe_audio_file(audio_storage, flashcard_id=None, requested_language_c
                 "worker_language": ASR_LANGUAGE_CODE,
                 "configured_model_name": ASR_MODEL_NAME,
                 "flashcard_id": flashcard_id,
-                "used_mock_transcription": False,
                 "audio_input_bytes": audio_input_bytes,
                 "audio_duration_ms": audio_duration_ms,
                 "wav_file_size_bytes": wav_file_size_bytes,

@@ -249,7 +249,6 @@ def test_asr_stats_reports_memory_and_cache_data(client, monkeypatch):
                 "total_requests": 4,
                 "successful_requests": 4,
                 "failed_requests": 0,
-                "mock_requests": 0,
                 "last_request_at": "2026-04-15T12:05:00",
             },
             "last_request_metrics": None,
@@ -313,7 +312,6 @@ def test_asr_metrics_returns_prometheus_style_metrics(client, monkeypatch):
             "request_counts": {
                 "total_requests": 3,
                 "failed_requests": 1,
-                "mock_requests": 2,
             },
             "last_request_metrics": {
                 "request_duration_ms": 555,
@@ -335,7 +333,6 @@ def test_asr_metrics_returns_prometheus_style_metrics(client, monkeypatch):
     assert "verbal_flashcards_asr_load_memory_delta_bytes 666" in body
     assert "verbal_flashcards_asr_requests_total 3" in body
     assert "verbal_flashcards_asr_requests_failed_total 1" in body
-    assert "verbal_flashcards_asr_requests_mock_total 2" in body
     assert "verbal_flashcards_asr_last_request_duration_ms 555" in body
     assert "verbal_flashcards_asr_last_request_memory_delta_bytes 444" in body
     assert "verbal_flashcards_asr_last_request_audio_input_bytes 333" in body
@@ -369,6 +366,7 @@ def test_transcribe_endpoint_returns_request_metrics(client, monkeypatch):
 
     assert response.status_code == 200
     assert data["transcription"] == "hej"
+    assert "flashcard" not in data
     assert data["request_metrics"]["language_code"] == "de"
     assert data["request_metrics"]["flashcard_id"] == "17"
     assert data["request_metrics"]["request_duration_ms"] == 123.4

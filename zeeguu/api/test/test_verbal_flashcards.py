@@ -1,4 +1,5 @@
 import io
+from werkzeug.datastructures import FileStorage
 
 from fixtures import (
     logged_in_client as client,
@@ -191,32 +192,68 @@ def test_check_pronunciation_returns_accuracy_analysis(client):
     assert response["wordMatches"][0]["matchType"] == "normalized_exact"
 
 
+def test_parse_asr_service_urls_supports_multiple_language_workers():
+    from zeeguu.core.audio_lessons.asr_service_client import parse_asr_service_urls
+
+    mapping = parse_asr_service_urls(
+        "da=http://asr-da:5002, de=http://asr-de:5002;fr=http://asr-fr:5002"
+    )
+
+    assert mapping == {
+        "da": "http://asr-da:5002",
+        "de": "http://asr-de:5002",
+        "fr": "http://asr-fr:5002",
+    }
+
+
 def test_asr_stats_reports_memory_and_cache_data(client, monkeypatch):
     add_context_types()
     add_source_types()
 
     from zeeguu.api.endpoints import verbal_flashcards
 
-    monkeypatch.setattr(verbal_flashcards, "ASR_AVAILABLE", True)
-    monkeypatch.setattr(verbal_flashcards, "asr_model", object())
     monkeypatch.setattr(
         verbal_flashcards,
-        "_asr_model_stats",
-        {
-            "configured_model_name": "nvidia/parakeet-rnnt-110m-da-dk",
-            "load_started_at": "2026-04-15T12:00:00",
-            "load_finished_at": "2026-04-15T12:00:03",
-            "load_duration_ms": 3210.5,
-            "memory_before_bytes": 1000,
-            "memory_after_bytes": 5000,
-            "memory_delta_bytes": 4000,
-            "cache_size_bytes": 123456,
-        },
+        "get_asr_service_url",
+        lambda language_code: f"http://asr-{language_code}:5002",
     )
     monkeypatch.setattr(
         verbal_flashcards,
-        "_get_process_memory_stats",
-        lambda: {"rss_bytes": 7777, "rss_mb": 7.6, "memory_percent": 1.2},
+        "get_configured_asr_languages",
+        lambda: ["da", "de"],
+    )
+    monkeypatch.setattr(
+        verbal_flashcards,
+        "fetch_asr_worker_stats",
+        lambda language_code: {
+            "worker_name": f"asr-{language_code}",
+            "worker_language": language_code,
+            "configured_model_name": "nvidia/parakeet-rnnt-110m-da-dk",
+            "asr_available": True,
+            "model_loaded": True,
+            "load_started_at": "2026-04-15T12:00:00",
+            "load_finished_at": "2026-04-15T12:00:03",
+            "load_duration_ms": 3210.5,
+            "process_memory_rss_bytes": 7777,
+            "process_memory_rss_mb": 7.6,
+            "process_memory_percent": 1.2,
+            "memory_before_load_bytes": 1000,
+            "memory_before_load_mb": 1.0,
+            "memory_after_load_bytes": 5000,
+            "memory_after_load_mb": 4.9,
+            "memory_delta_bytes": 4000,
+            "memory_delta_mb": 0.0,
+            "model_cache_size_bytes": 123456,
+            "model_cache_size_mb": 0.1,
+            "request_counts": {
+                "total_requests": 4,
+                "successful_requests": 4,
+                "failed_requests": 0,
+                "mock_requests": 0,
+                "last_request_at": "2026-04-15T12:05:00",
+            },
+            "last_request_metrics": None,
+        },
     )
 
     response = client.get("/verbal_flashcards/asr_stats")
@@ -224,14 +261,37 @@ def test_asr_stats_reports_memory_and_cache_data(client, monkeypatch):
     assert response["asr_available"] is True
     assert response["model_loaded"] is True
     assert response["configured_model_name"] == "nvidia/parakeet-rnnt-110m-da-dk"
+    assert response["configured_worker_url"] == "http://asr-de:5002"
+    assert response["worker_name"] == "asr-de"
+    assert response["worker_language"] == "de"
+    assert response["worker_status"] == "ok"
     assert response["process_memory_rss_bytes"] == 7777
     assert response["process_memory_rss_mb"] == 7.6
     assert response["memory_delta_bytes"] == 4000
     assert response["model_cache_size_bytes"] == 123456
     assert response["learned_language"] == "de"
-    assert response["model_matches_learned_language"] is False
-    assert response["request_counts"]["total_requests"] == 0
+    assert response["model_matches_learned_language"] is True
+    assert response["configured_languages"] == ["da", "de"]
+    assert response["request_counts"]["total_requests"] == 4
     assert response["last_request_metrics"] is None
+
+
+def test_asr_stats_reports_missing_worker_configuration(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    from zeeguu.api.endpoints import verbal_flashcards
+
+    monkeypatch.setattr(verbal_flashcards, "get_asr_service_url", lambda language_code: None)
+    monkeypatch.setattr(verbal_flashcards, "get_configured_asr_languages", lambda: ["da"])
+
+    response = client.get("/verbal_flashcards/asr_stats")
+
+    assert response["asr_available"] is False
+    assert response["model_loaded"] is False
+    assert response["worker_status"] == "not_configured"
+    assert response["configured_worker_url"] is None
+    assert response["learned_language"] == "de"
 
 
 def test_asr_metrics_returns_prometheus_style_metrics(client, monkeypatch):
@@ -312,6 +372,84 @@ def test_transcribe_endpoint_returns_request_metrics(client, monkeypatch):
     assert data["request_metrics"]["language_code"] == "de"
     assert data["request_metrics"]["flashcard_id"] == "17"
     assert data["request_metrics"]["request_duration_ms"] == 123.4
+
+
+def test_transcribe_audio_routes_to_language_worker(monkeypatch):
+    from zeeguu.api.endpoints import verbal_flashcards
+
+    captured = {}
+
+    def fake_transcribe_with_asr_worker(
+        audio_bytes,
+        filename,
+        content_type,
+        language_code,
+        flashcard_id=None,
+        service_url_map=None,
+        timeout=None,
+    ):
+        captured["audio_bytes"] = audio_bytes
+        captured["filename"] = filename
+        captured["content_type"] = content_type
+        captured["language_code"] = language_code
+        captured["flashcard_id"] = flashcard_id
+        return {
+            "transcription": "hej",
+            "request_metrics": {
+                "request_duration_ms": 222.2,
+            },
+        }
+
+    monkeypatch.setattr(
+        verbal_flashcards,
+        "transcribe_with_asr_worker",
+        fake_transcribe_with_asr_worker,
+    )
+
+    audio_file = FileStorage(
+        stream=io.BytesIO(b"audio-bytes"),
+        filename="sample.webm",
+        content_type="audio/webm",
+    )
+
+    result = verbal_flashcards.transcribe_audio(
+        audio_file,
+        language_code="da",
+        flashcard_id="17",
+    )
+
+    assert result["transcription"] == "hej"
+    assert result["request_metrics"]["language_code"] == "da"
+    assert result["request_metrics"]["flashcard_id"] == "17"
+    assert captured["audio_bytes"] == b"audio-bytes"
+    assert captured["filename"] == "sample.webm"
+    assert captured["content_type"] == "audio/webm"
+    assert captured["language_code"] == "da"
+    assert captured["flashcard_id"] == "17"
+
+
+def test_transcribe_endpoint_returns_503_when_worker_is_not_configured(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    from zeeguu.core.audio_lessons.asr_service_client import ASRServiceNotConfigured
+
+    def raise_not_configured(audio_file, language_code=None, flashcard_id=None):
+        raise ASRServiceNotConfigured("No ASR worker configured for language 'de'")
+
+    monkeypatch.setattr(
+        "zeeguu.api.endpoints.verbal_flashcards.transcribe_audio",
+        raise_not_configured,
+    )
+
+    response = client.client.post(
+        client.append_session("/verbal_flashcards/transcribe"),
+        data={"file": (io.BytesIO(b"fake audio"), "sample.wav"), "flashcard_id": "17"},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 503
+    assert b"No ASR worker configured for language 'de'" in response.data
 
 
 def test_verbal_flashcards_submit_reports_exercise_outcome(client):

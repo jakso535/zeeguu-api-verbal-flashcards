@@ -1,5 +1,6 @@
 import os.path
 import re
+import os
 
 from flask import request
 
@@ -39,6 +40,14 @@ def voice_for_language(language_id):
     return _code_from_id(language_id) + "-Standard-A"
 
 
+def _data_folder():
+    return ZEEGUU_DATA_FOLDER or os.environ.get("ZEEGUU_DATA_FOLDER") or "."
+
+
+def _absolute_audio_file_path(audio_file_path):
+    return os.path.join(_data_folder(), audio_file_path.lstrip("/"))
+
+
 @api.route("/text_to_speech", methods=("POST",))
 @cross_domain
 @requires_session
@@ -62,7 +71,8 @@ def tts():
         audio_file_path = "/static/test.mp3"
     else:
         audio_file_path = _file_name_for_phrase(phrase, language_id)
-        if not os.path.isfile(ZEEGUU_DATA_FOLDER + audio_file_path):
+        absolute_audio_path = _absolute_audio_file_path(audio_file_path)
+        if not os.path.isfile(absolute_audio_path):
             _save_speech_to_file(phrase.content, language_id, audio_file_path)
 
     print(audio_file_path)
@@ -99,7 +109,7 @@ def mp3_of_full_article():
         text_to_pronounce, language_id, article_id
     )
 
-    if not os.path.isfile(ZEEGUU_DATA_FOLDER + audio_file_path):
+    if not os.path.isfile(_absolute_audio_file_path(audio_file_path)):
         _save_speech_to_file(text_to_pronounce, language_id, audio_file_path)
 
     print(audio_file_path)
@@ -132,7 +142,10 @@ def _save_speech_to_file(text_to_speak, language_id, audio_file_path):
     )
 
     # The response's audio_content is binary.
-    with open(ZEEGUU_DATA_FOLDER + audio_file_path, "wb") as out:
+    absolute_audio_path = _absolute_audio_file_path(audio_file_path)
+    os.makedirs(os.path.dirname(absolute_audio_path), exist_ok=True)
+
+    with open(absolute_audio_path, "wb") as out:
         # Write the response to the output file.
         out.write(response.audio_content)
 

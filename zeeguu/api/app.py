@@ -8,6 +8,7 @@ import os
 import re
 import zeeguu
 from zeeguu.config import ZEEGUU_DATA_FOLDER
+import zeeguu.config as zeeguu_config
 
 from zeeguu.logging import warning
 from zeeguu.api.utils.rate_limiter import init_limiter, apply_rate_limits_to_endpoints
@@ -40,6 +41,8 @@ logger.setLevel(logging.CRITICAL)
 
 
 def create_app(testing=False):
+    global ZEEGUU_DATA_FOLDER
+
     # *** Creating and starting the App *** #
     app = Flask("Zeeguu-API")
     CORS(app)
@@ -67,6 +70,22 @@ def create_app(testing=False):
             "SMTP_EMAIL",
         ],
     )
+
+    # Keep module-level config consumers in sync with values loaded from api.cfg.
+    configured_data_folder = app.config.get("ZEEGUU_DATA_FOLDER")
+    if configured_data_folder:
+        os.environ["ZEEGUU_DATA_FOLDER"] = configured_data_folder
+        zeeguu_config.ZEEGUU_DATA_FOLDER = configured_data_folder
+        ZEEGUU_DATA_FOLDER = configured_data_folder
+
+    configured_resources_folder = app.config.get("ZEEGUU_RESOURCES_FOLDER")
+    if configured_resources_folder:
+        os.environ["ZEEGUU_RESOURCES_FOLDER"] = configured_resources_folder
+        zeeguu_config.ZEEGUU_RESOURCES_FOLDER = configured_resources_folder
+
+    configured_asr_service_urls = app.config.get("ASR_SERVICE_URLS")
+    if configured_asr_service_urls and not os.environ.get("ASR_SERVICE_URLS"):
+        os.environ["ASR_SERVICE_URLS"] = configured_asr_service_urls
 
     # if we don't specify the charset in the connection string
     # we are not able to store emojis

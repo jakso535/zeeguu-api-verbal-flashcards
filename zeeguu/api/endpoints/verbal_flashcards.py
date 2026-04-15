@@ -1,11 +1,7 @@
 import traceback
 import flask
-import io
-import os
-import tempfile
 import re
 import unicodedata
-import time
 from datetime import datetime
 from flask import request, Response
 from sqlalchemy.orm import joinedload
@@ -21,163 +17,122 @@ from zeeguu.core.word_scheduling.basicSR.four_levels_per_word import FourLevelsP
 from zeeguu.core.exercises.verbal_flashcard_seeding import (
     seed_verbal_flashcards_for_user,
 )
+from zeeguu.core.audio_lessons.asr_service_client import (
+    ASRServiceNotConfigured,
+    ASRServiceRequestError,
+    fetch_asr_worker_stats,
+    get_asr_service_url,
+    get_configured_asr_languages,
+    transcribe_with_asr_worker,
+)
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
 from . import api, db_session
 from zeeguu.logging import log
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
-
-try:
-    from huggingface_hub import scan_cache_dir
-except ImportError:
-    scan_cache_dir = None
-
-
-def _get_process_memory_stats():
-    if psutil is None:
-        return {
-            "rss_bytes": None,
-            "rss_mb": None,
-            "memory_percent": None,
-        }
-
-    process = psutil.Process()
-    mem_info = process.memory_info()
-    return {
-        "rss_bytes": mem_info.rss,
-        "rss_mb": round(mem_info.rss / 1024 / 1024, 1),
-        "memory_percent": round(process.memory_percent(), 1),
-    }
-
-
-def _get_hf_cached_model_size_bytes(model_name):
-    if scan_cache_dir is None or not model_name:
-        return None
-
-    try:
-        cache_info = scan_cache_dir()
-        for repo in cache_info.repos:
-            if repo.repo_id == model_name:
-                return repo.size_on_disk
-    except Exception as e:
-        log(f"Could not inspect Hugging Face cache for {model_name}: {e}")
-
-    return None
-
-
-def _bytes_to_mb(value):
-    if value is None:
-        return None
-    return round(value / 1024 / 1024, 1)
-
-# Try to import ASR libraries, but make it optional
-DEFAULT_ASR_MODEL_NAME = "nvidia/parakeet-rnnt-110m-da-dk"
-_asr_model_stats = {
-    "configured_model_name": DEFAULT_ASR_MODEL_NAME,
-    "load_started_at": None,
-    "load_finished_at": None,
-    "load_duration_ms": None,
-    "memory_before_bytes": None,
-    "memory_after_bytes": None,
-    "memory_delta_bytes": None,
-    "cache_size_bytes": None,
-}
-_asr_request_stats = {
-    "total_requests": 0,
-    "successful_requests": 0,
-    "failed_requests": 0,
-    "mock_requests": 0,
-    "last_request_at": None,
-}
-_last_asr_request_metrics = None
-
-try:
-    import nemo.collections.asr as nemo_asr
-    from pydub import AudioSegment
-    ASR_AVAILABLE = True
-    _memory_before = _get_process_memory_stats()
-    _asr_model_stats["load_started_at"] = datetime.now().isoformat()
-    _load_start = time.perf_counter()
-    # Load the ASR model once at module load
-    asr_model = nemo_asr.models.ASRModel.from_pretrained(
-        model_name=DEFAULT_ASR_MODEL_NAME
-    )
-    _load_end = time.perf_counter()
-    _memory_after = _get_process_memory_stats()
-
-    _asr_model_stats["load_finished_at"] = datetime.now().isoformat()
-    _asr_model_stats["load_duration_ms"] = round((_load_end - _load_start) * 1000, 1)
-    _asr_model_stats["memory_before_bytes"] = _memory_before["rss_bytes"]
-    _asr_model_stats["memory_after_bytes"] = _memory_after["rss_bytes"]
-    if _memory_before["rss_bytes"] is not None and _memory_after["rss_bytes"] is not None:
-        _asr_model_stats["memory_delta_bytes"] = (
-            _memory_after["rss_bytes"] - _memory_before["rss_bytes"]
-        )
-    _asr_model_stats["cache_size_bytes"] = _get_hf_cached_model_size_bytes(
-        DEFAULT_ASR_MODEL_NAME
-    )
-    log("ASR model loaded successfully")
-except ImportError as e:
-    ASR_AVAILABLE = False
-    asr_model = None
-    log(f"ASR libraries not available: {e}")
-except Exception as e:
-    ASR_AVAILABLE = False
-    asr_model = None
-    log(f"Failed to load ASR model: {e}")
-
-
 VERBAL_FLASHCARD_EXERCISE_SOURCE = "Verbal Flashcards"
 
 
-def get_asr_stats_for_user(user):
-    process_memory = _get_process_memory_stats()
+def _empty_asr_stats_for_user(user, failure_reason=None):
     learned_language_code = user.learned_language.code if user and user.learned_language else None
-    cache_size_bytes = _asr_model_stats.get("cache_size_bytes")
+    configured_worker_url = get_asr_service_url(learned_language_code)
+
+    if not learned_language_code:
+        worker_status = "no_language_selected"
+    elif not configured_worker_url:
+        worker_status = "not_configured"
+    elif failure_reason:
+        worker_status = "error"
+    else:
+        worker_status = "unavailable"
 
     return {
         "learned_language": learned_language_code,
-        "configured_model_name": _asr_model_stats.get("configured_model_name"),
-        "asr_available": ASR_AVAILABLE,
-        "model_loaded": asr_model is not None,
-        "model_matches_learned_language": learned_language_code == "da",
-        "load_started_at": _asr_model_stats.get("load_started_at"),
-        "load_finished_at": _asr_model_stats.get("load_finished_at"),
-        "load_duration_ms": _asr_model_stats.get("load_duration_ms"),
-        "process_memory_rss_bytes": process_memory["rss_bytes"],
-        "process_memory_rss_mb": process_memory["rss_mb"],
-        "process_memory_percent": process_memory["memory_percent"],
-        "memory_before_load_bytes": _asr_model_stats.get("memory_before_bytes"),
-        "memory_before_load_mb": _bytes_to_mb(_asr_model_stats.get("memory_before_bytes")),
-        "memory_after_load_bytes": _asr_model_stats.get("memory_after_bytes"),
-        "memory_after_load_mb": _bytes_to_mb(_asr_model_stats.get("memory_after_bytes")),
-        "memory_delta_bytes": _asr_model_stats.get("memory_delta_bytes"),
-        "memory_delta_mb": _bytes_to_mb(_asr_model_stats.get("memory_delta_bytes")),
-        "model_cache_size_bytes": cache_size_bytes,
-        "model_cache_size_mb": _bytes_to_mb(cache_size_bytes),
-        "request_counts": dict(_asr_request_stats),
-        "last_request_metrics": _last_asr_request_metrics,
+        "configured_languages": get_configured_asr_languages(),
+        "configured_worker_url": configured_worker_url,
+        "worker_name": None,
+        "worker_language": learned_language_code,
+        "worker_status": worker_status,
+        "configured_model_name": None,
+        "asr_available": False,
+        "model_loaded": False,
+        "model_matches_learned_language": False,
+        "load_started_at": None,
+        "load_finished_at": None,
+        "load_duration_ms": None,
+        "process_memory_rss_bytes": None,
+        "process_memory_rss_mb": None,
+        "process_memory_percent": None,
+        "memory_before_load_bytes": None,
+        "memory_before_load_mb": None,
+        "memory_after_load_bytes": None,
+        "memory_after_load_mb": None,
+        "memory_delta_bytes": None,
+        "memory_delta_mb": None,
+        "model_cache_size_bytes": None,
+        "model_cache_size_mb": None,
+        "request_counts": {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "mock_requests": 0,
+            "last_request_at": None,
+        },
+        "last_request_metrics": None,
+        "failure_reason": failure_reason,
     }
 
 
-def _finalize_asr_request_metrics(metrics):
-    global _last_asr_request_metrics
+def get_asr_stats_for_user(user):
+    learned_language_code = user.learned_language.code if user and user.learned_language else None
+    if not learned_language_code:
+        return _empty_asr_stats_for_user(user)
 
-    _asr_request_stats["total_requests"] += 1
-    _asr_request_stats["last_request_at"] = metrics["request_started_at"]
-    if metrics["used_mock_transcription"]:
-        _asr_request_stats["mock_requests"] += 1
-    if metrics["status"] == "success":
-        _asr_request_stats["successful_requests"] += 1
-    else:
-        _asr_request_stats["failed_requests"] += 1
+    configured_worker_url = get_asr_service_url(learned_language_code)
+    if not configured_worker_url:
+        return _empty_asr_stats_for_user(user)
 
-    _last_asr_request_metrics = metrics
-    return metrics
+    try:
+        worker_stats = fetch_asr_worker_stats(learned_language_code)
+    except ASRServiceRequestError as exc:
+        log(f"Could not fetch ASR stats for language {learned_language_code}: {exc}")
+        return _empty_asr_stats_for_user(user, failure_reason=str(exc))
+
+    return {
+        "learned_language": learned_language_code,
+        "configured_languages": get_configured_asr_languages(),
+        "configured_worker_url": configured_worker_url,
+        "worker_name": worker_stats.get("worker_name"),
+        "worker_language": worker_stats.get("worker_language"),
+        "worker_status": "ok",
+        "configured_model_name": worker_stats.get("configured_model_name"),
+        "asr_available": bool(worker_stats.get("asr_available")),
+        "model_loaded": bool(worker_stats.get("model_loaded")),
+        "model_matches_learned_language": worker_stats.get("worker_language") == learned_language_code,
+        "load_started_at": worker_stats.get("load_started_at"),
+        "load_finished_at": worker_stats.get("load_finished_at"),
+        "load_duration_ms": worker_stats.get("load_duration_ms"),
+        "process_memory_rss_bytes": worker_stats.get("process_memory_rss_bytes"),
+        "process_memory_rss_mb": worker_stats.get("process_memory_rss_mb"),
+        "process_memory_percent": worker_stats.get("process_memory_percent"),
+        "memory_before_load_bytes": worker_stats.get("memory_before_load_bytes"),
+        "memory_before_load_mb": worker_stats.get("memory_before_load_mb"),
+        "memory_after_load_bytes": worker_stats.get("memory_after_load_bytes"),
+        "memory_after_load_mb": worker_stats.get("memory_after_load_mb"),
+        "memory_delta_bytes": worker_stats.get("memory_delta_bytes"),
+        "memory_delta_mb": worker_stats.get("memory_delta_mb"),
+        "model_cache_size_bytes": worker_stats.get("model_cache_size_bytes"),
+        "model_cache_size_mb": worker_stats.get("model_cache_size_mb"),
+        "request_counts": worker_stats.get("request_counts") or {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "mock_requests": 0,
+            "last_request_at": None,
+        },
+        "last_request_metrics": worker_stats.get("last_request_metrics"),
+        "failure_reason": None,
+    }
 
 
 def _verbal_flashcard_from_user_word(user_word):
@@ -615,156 +570,39 @@ def calculate_accuracy(user_speech, expected_text):
 
 
 def get_feedback_message(accuracy, accepted_words, total_words):
-    """Generate feedback message without any word-order component."""
+    """Return one of the two simplified feedback outcomes for verbal flashcards."""
     if total_words and accepted_words == total_words:
-        if accuracy >= 95:
-            return "Excellent! Totally perfect! 🌟"
-        if accuracy >= 85:
-            return "Great! Almost perfect! ✨"
-        return "Nice job! 👍"
-
-    if accuracy >= 70:
-        return "Close! Try once more 💪"
-    if accuracy >= 50:
-        return "Not bad! Keep practicing! 💪"
-    if accuracy >= 30:
-        return "Keep going! Try again 📚"
-    if accuracy >= 10:
-        return "Start slowly, say it clearly 🗣️"
-    return "Try again, take your time 💪"
+        return "Success"
+    return "Very close, try again"
 
 
 def generate_detailed_analysis(final_accuracy, correct_words, total_words, word_matches):
-    """Generate detailed analysis without any word-order feedback."""
-    if total_words == 0:
-        return "No words to compare"
-
-    incorrect_words = [w for w in word_matches if not w.get("isCorrect", False)]
-
-    if len(incorrect_words) == 0:
-        return f"Perfect! All {total_words} words were accepted. 🎉"
-
-    if len(incorrect_words) == 1:
-        close_word = incorrect_words[0]
-        if close_word.get("isClose"):
-            return (
-                f"Very close. Expected '{close_word['word']}', "
-                f"heard '{close_word.get('userWord') or '?'}'. Try once more."
-            )
-        return f"Keep practicing this word: '{close_word['word']}'"
-
-    problem_words = ", ".join([f"'{w['word']}'" for w in incorrect_words[:3]])
-    if len(incorrect_words) > 3:
-        return (
-            f"You got {correct_words} out of {total_words} words accepted. "
-            f"Focus on: {problem_words} and {len(incorrect_words) - 3} more"
-        )
-
-    return f"You got {correct_words} out of {total_words} words accepted. Focus on: {problem_words}"
+    """Hide detailed feedback so the UI only shows the simplified main message."""
+    return ""
 
 
 def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
 
     """
-    Transcribe audio file using the ASR model.
-    Returns the transcription text.
+    Transcribe audio by routing the request to the dedicated ASR worker that
+    owns the model for the user's learned language.
     """
-    request_started_at = datetime.now().isoformat()
-    started_at = time.perf_counter()
-    process_memory_before = _get_process_memory_stats()
-    used_mock_transcription = not ASR_AVAILABLE or asr_model is None
-    audio_duration_ms = None
-    audio_input_bytes = None
-    wav_file_size_bytes = None
-    transcription = None
-    error_message = None
-    temp_path = None
+    audio_bytes = audio_file.read()
+    transcription_result = transcribe_with_asr_worker(
+        audio_bytes,
+        getattr(audio_file, "filename", None),
+        getattr(audio_file, "content_type", None),
+        language_code,
+        flashcard_id=flashcard_id,
+    )
 
-    try:
-        audio_data = audio_file.read()
-        audio_input_bytes = len(audio_data)
-
-        if not ASR_AVAILABLE or asr_model is None:
-            # Mock transcription for testing
-            log("ASR not available, returning mock transcription")
-            transcription = "Mock transcription: audio received"
-        else:
-            audio = AudioSegment.from_file(io.BytesIO(audio_data))
-            audio = audio.set_channels(1).set_frame_rate(16000)
-            audio_duration_ms = len(audio)
-
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_path = temp_file.name
-                audio.export(temp_path, format="wav")
-            wav_file_size_bytes = os.path.getsize(temp_path)
-
-            transcript = asr_model.transcribe([temp_path])
-
-            # TODO: research what type is expected from parakeet asr
-
-            if isinstance(transcript, tuple) and len(transcript) == 2:
-                transcript = transcript[0]
-
-            first = transcript[0]
-
-            if hasattr(first, "text"):
-                transcription = first.text
-            elif isinstance(first, str):
-                transcription = first
-            elif isinstance(first, list) and first:
-                inner = first[0]
-                if hasattr(inner, "text"):
-                    transcription = inner.text
-                elif isinstance(inner, str):
-                    transcription = inner
-
-            if transcription is None:
-                raise TypeError(
-                    f"Unexpected transcription output: {type(transcript)} / {type(first)}"
-                )
-    except Exception as e:
-        error_message = str(e)
-        log(f"Transcription error: {e}")
-        raise
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
-
-        process_memory_after = _get_process_memory_stats()
-        process_memory_before_bytes = process_memory_before["rss_bytes"]
-        process_memory_after_bytes = process_memory_after["rss_bytes"]
-        process_memory_delta_bytes = None
-
-        if process_memory_before_bytes is not None and process_memory_after_bytes is not None:
-            process_memory_delta_bytes = (
-                process_memory_after_bytes - process_memory_before_bytes
-            )
-
-        request_metrics = _finalize_asr_request_metrics(
-            {
-                "request_started_at": request_started_at,
-                "request_duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
-                "status": "error" if error_message else "success",
-                "language_code": language_code,
-                "flashcard_id": flashcard_id,
-                "used_mock_transcription": used_mock_transcription,
-                "audio_input_bytes": audio_input_bytes,
-                "audio_duration_ms": audio_duration_ms,
-                "wav_file_size_bytes": wav_file_size_bytes,
-                "transcription_chars": len(transcription or ""),
-                "error_message": error_message,
-                "process_memory_before_bytes": process_memory_before_bytes,
-                "process_memory_before_mb": process_memory_before["rss_mb"],
-                "process_memory_after_bytes": process_memory_after_bytes,
-                "process_memory_after_mb": process_memory_after["rss_mb"],
-                "process_memory_delta_bytes": process_memory_delta_bytes,
-                "process_memory_delta_mb": _bytes_to_mb(process_memory_delta_bytes),
-            }
-        )
+    request_metrics = dict(transcription_result.get("request_metrics") or {})
+    request_metrics.setdefault("language_code", language_code)
+    request_metrics.setdefault("flashcard_id", flashcard_id)
+    request_metrics.setdefault("used_mock_transcription", False)
 
     return {
-        "transcription": transcription,
+        "transcription": transcription_result.get("transcription", ""),
         "request_metrics": request_metrics,
     }
 
@@ -834,6 +672,12 @@ def transcribe_audio_endpoint():
             "request_metrics": request_metrics,
         })
 
+    except ASRServiceNotConfigured as e:
+        log(f"Transcription endpoint not configured: {e}")
+        return json_result({"error": str(e)}), 503
+    except ASRServiceRequestError as e:
+        log(f"Transcription endpoint worker failure: {e}")
+        return json_result({"error": str(e)}), 502
     except Exception as e:
         log(f"Transcription endpoint error: {e}")
         traceback.print_exc()
@@ -952,7 +796,7 @@ def verbal_flashcards_asr_metrics():
         "# TYPE verbal_flashcards_asr_model_loaded gauge",
         f"verbal_flashcards_asr_model_loaded {1 if stats['model_loaded'] else 0}",
         "",
-        "# HELP verbal_flashcards_asr_process_memory_bytes Current API process RSS memory",
+        "# HELP verbal_flashcards_asr_process_memory_bytes Current ASR worker process RSS memory",
         "# TYPE verbal_flashcards_asr_process_memory_bytes gauge",
         f"verbal_flashcards_asr_process_memory_bytes {stats['process_memory_rss_bytes'] or 0}",
         "",
@@ -964,7 +808,7 @@ def verbal_flashcards_asr_metrics():
         "# TYPE verbal_flashcards_asr_load_duration_ms gauge",
         f"verbal_flashcards_asr_load_duration_ms {stats['load_duration_ms'] or 0}",
         "",
-        "# HELP verbal_flashcards_asr_load_memory_delta_bytes Change in process RSS during ASR model load",
+        "# HELP verbal_flashcards_asr_load_memory_delta_bytes Change in worker RSS during ASR model load",
         "# TYPE verbal_flashcards_asr_load_memory_delta_bytes gauge",
         f"verbal_flashcards_asr_load_memory_delta_bytes {stats['memory_delta_bytes'] or 0}",
         "",

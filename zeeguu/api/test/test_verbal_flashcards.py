@@ -1,3 +1,5 @@
+import io
+
 from fixtures import (
     logged_in_client as client,
     add_one_bookmark,
@@ -187,6 +189,129 @@ def test_check_pronunciation_returns_accuracy_analysis(client):
     assert response["isAccepted"] is True
     assert response["acceptedWordCount"] == 1
     assert response["wordMatches"][0]["matchType"] == "normalized_exact"
+
+
+def test_asr_stats_reports_memory_and_cache_data(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    from zeeguu.api.endpoints import verbal_flashcards
+
+    monkeypatch.setattr(verbal_flashcards, "ASR_AVAILABLE", True)
+    monkeypatch.setattr(verbal_flashcards, "asr_model", object())
+    monkeypatch.setattr(
+        verbal_flashcards,
+        "_asr_model_stats",
+        {
+            "configured_model_name": "nvidia/parakeet-rnnt-110m-da-dk",
+            "load_started_at": "2026-04-15T12:00:00",
+            "load_finished_at": "2026-04-15T12:00:03",
+            "load_duration_ms": 3210.5,
+            "memory_before_bytes": 1000,
+            "memory_after_bytes": 5000,
+            "memory_delta_bytes": 4000,
+            "cache_size_bytes": 123456,
+        },
+    )
+    monkeypatch.setattr(
+        verbal_flashcards,
+        "_get_process_memory_stats",
+        lambda: {"rss_bytes": 7777, "rss_mb": 7.6, "memory_percent": 1.2},
+    )
+
+    response = client.get("/verbal_flashcards/asr_stats")
+
+    assert response["asr_available"] is True
+    assert response["model_loaded"] is True
+    assert response["configured_model_name"] == "nvidia/parakeet-rnnt-110m-da-dk"
+    assert response["process_memory_rss_bytes"] == 7777
+    assert response["process_memory_rss_mb"] == 7.6
+    assert response["memory_delta_bytes"] == 4000
+    assert response["model_cache_size_bytes"] == 123456
+    assert response["learned_language"] == "de"
+    assert response["model_matches_learned_language"] is False
+    assert response["request_counts"]["total_requests"] == 0
+    assert response["last_request_metrics"] is None
+
+
+def test_asr_metrics_returns_prometheus_style_metrics(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    from zeeguu.api.endpoints import verbal_flashcards
+
+    monkeypatch.setattr(
+        verbal_flashcards,
+        "get_asr_stats_for_user",
+        lambda user: {
+            "asr_available": True,
+            "model_loaded": True,
+            "process_memory_rss_bytes": 999,
+            "model_cache_size_bytes": 888,
+            "load_duration_ms": 777,
+            "memory_delta_bytes": 666,
+            "request_counts": {
+                "total_requests": 3,
+                "failed_requests": 1,
+                "mock_requests": 2,
+            },
+            "last_request_metrics": {
+                "request_duration_ms": 555,
+                "process_memory_delta_bytes": 444,
+                "audio_input_bytes": 333,
+            },
+        },
+    )
+
+    response = client.client.get(client.append_session("/verbal_flashcards/asr_metrics"))
+    body = response.data.decode("utf-8")
+
+    assert response.status_code == 200
+    assert "verbal_flashcards_asr_available 1" in body
+    assert "verbal_flashcards_asr_model_loaded 1" in body
+    assert "verbal_flashcards_asr_process_memory_bytes 999" in body
+    assert "verbal_flashcards_asr_model_cache_size_bytes 888" in body
+    assert "verbal_flashcards_asr_load_duration_ms 777" in body
+    assert "verbal_flashcards_asr_load_memory_delta_bytes 666" in body
+    assert "verbal_flashcards_asr_requests_total 3" in body
+    assert "verbal_flashcards_asr_requests_failed_total 1" in body
+    assert "verbal_flashcards_asr_requests_mock_total 2" in body
+    assert "verbal_flashcards_asr_last_request_duration_ms 555" in body
+    assert "verbal_flashcards_asr_last_request_memory_delta_bytes 444" in body
+    assert "verbal_flashcards_asr_last_request_audio_input_bytes 333" in body
+
+
+def test_transcribe_endpoint_returns_request_metrics(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    monkeypatch.setattr(
+        "zeeguu.api.endpoints.verbal_flashcards.transcribe_audio",
+        lambda audio_file, language_code=None, flashcard_id=None: {
+            "transcription": "hej",
+            "request_metrics": {
+                "language_code": language_code,
+                "flashcard_id": flashcard_id,
+                "request_duration_ms": 123.4,
+                "audio_input_bytes": 321,
+                "process_memory_delta_bytes": 456,
+            },
+        },
+    )
+
+    response = client.client.post(
+        client.append_session("/verbal_flashcards/transcribe"),
+        data={"file": (io.BytesIO(b"fake audio"), "sample.wav"), "flashcard_id": "17"},
+        content_type="multipart/form-data",
+    )
+
+    data = response.get_json()
+
+    assert response.status_code == 200
+    assert data["transcription"] == "hej"
+    assert data["request_metrics"]["language_code"] == "de"
+    assert data["request_metrics"]["flashcard_id"] == "17"
+    assert data["request_metrics"]["request_duration_ms"] == 123.4
 
 
 def test_verbal_flashcards_submit_reports_exercise_outcome(client):

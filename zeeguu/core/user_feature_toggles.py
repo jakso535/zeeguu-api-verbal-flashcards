@@ -17,6 +17,22 @@ def _csv_env_values(env_var_name):
     }
 
 
+def _user_invite_codes(user):
+    invite_codes = set()
+
+    invitation_code = (getattr(user, "invitation_code", None) or "").strip().casefold()
+    if invitation_code:
+        invite_codes.add(invitation_code)
+
+    for user_cohort in getattr(user, "cohorts", []) or []:
+        cohort = getattr(user_cohort, "cohort", None)
+        cohort_invite_code = (getattr(cohort, "inv_code", None) or "").strip().casefold()
+        if cohort_invite_code:
+            invite_codes.add(cohort_invite_code)
+
+    return invite_codes
+
+
 def _feature_map():
     return {
         "audio_exercises": _audio_exercises,
@@ -109,5 +125,4 @@ def _verbal_flashcards(user):
     if not allowed_invite_codes:
         return False
 
-    invitation_code = (user.invitation_code or "").strip().casefold()
-    return bool(invitation_code) and invitation_code in allowed_invite_codes
+    return bool(_user_invite_codes(user) & allowed_invite_codes)

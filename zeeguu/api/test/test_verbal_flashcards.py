@@ -1,4 +1,5 @@
 import io
+import pytest
 from werkzeug.datastructures import FileStorage
 
 from fixtures import (
@@ -7,6 +8,14 @@ from fixtures import (
     add_context_types,
     add_source_types,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enable_verbal_flashcards_feature(monkeypatch):
+    monkeypatch.setattr(
+        "zeeguu.api.endpoints.verbal_flashcards.is_feature_enabled_for_user",
+        lambda feature_name, user: feature_name == "verbal_flashcards",
+    )
 
 
 def _set_bookmark_level(bookmark_id, level):
@@ -68,6 +77,21 @@ def test_verbal_flashcards_only_returns_level_3_plus_words(client):
     assert flashcards["flashcards"][0]["prompt"] == expected_prompt
     assert flashcards["flashcards"][0]["answer"] == expected_answer
     assert flashcards["flashcards"][0]["expectedText"] == expected_answer
+
+
+def test_verbal_flashcards_returns_404_when_feature_is_disabled(client, monkeypatch):
+    add_context_types()
+    add_source_types()
+
+    monkeypatch.setattr(
+        "zeeguu.api.endpoints.verbal_flashcards.is_feature_enabled_for_user",
+        lambda feature_name, user: False,
+    )
+
+    response = client.client.get(client.append_session("/verbal_flashcards"))
+
+    assert response.status_code == 404
+    assert b"Verbal flashcards are not enabled for this user" in response.data
 
 
 def test_verbal_flashcards_deduplicate_same_origin_word(client):

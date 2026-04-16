@@ -21,12 +21,23 @@ from zeeguu.core.audio_lessons.asr_service_client import (
     get_configured_asr_languages,
     transcribe_with_asr_worker,
 )
+from zeeguu.core.user_feature_toggles import is_feature_enabled_for_user
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from zeeguu.api.utils.json_result import json_result
 from . import api, db_session
 from zeeguu.logging import log
 
 VERBAL_FLASHCARD_EXERCISE_SOURCE = "Verbal Flashcards"
+
+
+def _verbal_flashcards_unavailable_response():
+    return json_result({"error": "Verbal flashcards are not enabled for this user"}), 404
+
+
+def _ensure_verbal_flashcards_enabled(user):
+    if is_feature_enabled_for_user("verbal_flashcards", user):
+        return None
+    return _verbal_flashcards_unavailable_response()
 
 
 def _empty_asr_stats_for_user(user, failure_reason=None):
@@ -618,6 +629,9 @@ def transcribe_audio_endpoint():
             return json_result({"error": "Empty filename"}), 400
 
         user = User.find_by_id(flask.g.user_id)
+        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        if feature_gate:
+            return feature_gate
 
         # Get optional flashcard_id
         flashcard_id = request.form.get('flashcard_id')
@@ -677,6 +691,9 @@ def get_flashcards():
 
         # Get all flashcards
         user = User.find_by_id(flask.g.user_id)
+        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        if feature_gate:
+            return feature_gate
         flashcards = get_flashcard_collection(user)
 
         # Apply pagination
@@ -719,6 +736,9 @@ def reseed_flashcards():
             return json_result({"error": "count must be positive"}), 400
 
         user = User.find_by_id(flask.g.user_id)
+        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        if feature_gate:
+            return feature_gate
         result = seed_verbal_flashcards_for_user(db_session, user, count=count)
 
         log(
@@ -748,6 +768,9 @@ def reseed_flashcards():
 @requires_session
 def verbal_flashcards_asr_stats():
     user = User.find_by_id(flask.g.user_id)
+    feature_gate = _ensure_verbal_flashcards_enabled(user)
+    if feature_gate:
+        return feature_gate
     return json_result(get_asr_stats_for_user(user))
 
 
@@ -756,6 +779,9 @@ def verbal_flashcards_asr_stats():
 @requires_session
 def verbal_flashcards_asr_metrics():
     user = User.find_by_id(flask.g.user_id)
+    feature_gate = _ensure_verbal_flashcards_enabled(user)
+    if feature_gate:
+        return feature_gate
     stats = get_asr_stats_for_user(user)
     last_request = stats.get("last_request_metrics") or {}
     request_counts = stats.get("request_counts") or {}
@@ -843,6 +869,9 @@ def submit_answer():
             return json_result({"error": "flashcard_id and is_correct are required"}), 400
 
         user = User.find_by_id(flask.g.user_id)
+        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        if feature_gate:
+            return feature_gate
         flashcards = get_flashcard_collection(user)
         flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
 
@@ -928,6 +957,11 @@ def check_pronunciation():
         data = request.get_json()
         if not data:
             return json_result({"error": "JSON body required"}), 400
+
+        user = User.find_by_id(flask.g.user_id)
+        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        if feature_gate:
+            return feature_gate
 
         user_speech = data.get('user_speech', '')
         expected_text = data.get('expected_text', '')

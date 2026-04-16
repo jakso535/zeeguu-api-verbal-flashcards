@@ -59,6 +59,7 @@ python install_stanza_models.py
 For running via Docker instead of locally:
 
 - copy `default.env` to `.env` and update `ZEEGUU_DATA_FOLDER`
+- set `VERBAL_FLASHCARDS_INVITE_CODES` in `.env` to a comma-separated allowlist such as `Classe2019` or `beta-one,teacherpilot` if you want anyone other than admin/dev users to access verbal flashcards
 - run `generate_configs.sh`
 - run `docker compose up zapi_dev_translations`
 - verify at `localhost:8080/available_languages`

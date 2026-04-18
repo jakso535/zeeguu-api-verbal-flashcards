@@ -8,6 +8,7 @@ from flask import has_app_context, current_app
 logger = logging.getLogger(__name__)
 
 DEFAULT_ASR_SERVICE_TIMEOUT = float(os.environ.get("ASR_SERVICE_TIMEOUT", "30"))
+LOCAL_DEV_ASR_SERVICE_URLS = "da=http://127.0.0.1:5002"
 
 
 class ASRServiceError(RuntimeError):
@@ -58,13 +59,14 @@ def parse_asr_service_urls(raw_value):
 
 
 def configured_asr_service_urls():
+    """Return configured worker URLs, falling back to the local Danish worker."""
     raw_value = os.environ.get("ASR_SERVICE_URLS", "")
 
     if not raw_value and has_app_context():
         raw_value = current_app.config.get("ASR_SERVICE_URLS", "")
 
     if not raw_value:
-        raw_value = "da=http://127.0.0.1:5002"
+        raw_value = LOCAL_DEV_ASR_SERVICE_URLS
 
     return parse_asr_service_urls(raw_value)
 
@@ -82,7 +84,6 @@ def transcribe_with_asr_worker(
     filename,
     content_type,
     language_code,
-    flashcard_id=None,
     service_url_map=None,
     timeout=None,
 ):
@@ -99,10 +100,7 @@ def transcribe_with_asr_worker(
             content_type or "application/octet-stream",
         )
     }
-    data = {
-        "language_code": language_code or "",
-        "flashcard_id": flashcard_id or "",
-    }
+    data = {"language_code": language_code or ""}
 
     try:
         response = requests.post(

@@ -22,6 +22,20 @@ from . import api, db_session
 from zeeguu.logging import log
 
 VERBAL_FLASHCARD_EXERCISE_SOURCE = "Verbal Flashcards"
+DEFAULT_FLASHCARD_LIMIT = 50
+DEFAULT_FLASHCARD_OFFSET = 0
+SANITIZED_SPOKEN_TEXT_PATTERN = re.compile(r"[^\w\sæøåÆØÅ']")
+MULTISPACE_PATTERN = re.compile(r"\s+")
+CANONICAL_DANISH_VARIANTS = (
+    ("aa", "å"),
+    ("ae", "æ"),
+    ("oe", "ø"),
+)
+ASR_TOLERANT_DANISH_VARIANTS = (
+    ("æ", "e"),
+    ("ø", "o"),
+    ("å", "a"),
+)
 
 
 def _verbal_flashcards_unavailable_response():
@@ -32,6 +46,43 @@ def _ensure_verbal_flashcards_enabled(user):
     if is_feature_enabled_for_user("verbal_flashcards", user):
         return None
     return _verbal_flashcards_unavailable_response()
+
+
+def _current_verbal_flashcards_user():
+    user = User.find_by_id(flask.g.user_id)
+    return user, _ensure_verbal_flashcards_enabled(user)
+
+
+def _find_flashcard_for_user(user, flashcard_id):
+    if not flashcard_id:
+        return None
+
+    return next(
+        (card for card in get_flashcard_collection(user) if card["id"] == flashcard_id),
+        None,
+    )
+
+
+def _coerce_int(value, default=0, minimum=None):
+    try:
+        coerced_value = int(value)
+    except (TypeError, ValueError):
+        coerced_value = default
+
+    if minimum is not None:
+        return max(minimum, coerced_value)
+
+    return coerced_value
+
+
+def _parse_optional_session_id(value):
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError("session_id must be an integer")
 
 
 def _verbal_flashcard_from_user_word(user_word):
@@ -114,7 +165,6 @@ def _ensure_schedule_for_verbal_flashcard(user_word):
 FUZZY_ACCEPTANCE_BUFFER = 0.08
 
 
-
 def canonical_danish_form(word):
     """
     Normalize a word into a canonical written Danish form.
@@ -127,13 +177,7 @@ def canonical_danish_form(word):
 
     word = unicodedata.normalize("NFC", str(word).casefold())
 
-    spelling_variants = {
-        'aa': 'å',
-        'ae': 'æ',
-        'oe': 'ø',
-    }
-
-    for pattern, replacement in spelling_variants.items():
+    for pattern, replacement in CANONICAL_DANISH_VARIANTS:
         word = word.replace(pattern, replacement)
 
     return word
@@ -156,24 +200,17 @@ def asr_tolerant_danish_form(word):
     if word.endswith('g'):
         word = word[:-1]
 
-    asr_variants = {
-        'æ': 'e',
-        'ø': 'o',
-        'å': 'a',
-    }
-
-    for pattern, replacement in asr_variants.items():
+    for pattern, replacement in ASR_TOLERANT_DANISH_VARIANTS:
         word = word.replace(pattern, replacement)
 
     return word
 
 
 def sanitize_spoken_text(text):
-
     """Keep Danish characters while normalizing whitespace and punctuation."""
     text = text.lower().strip() if text else ""
-    text = re.sub(r"[^\w\sæøåÆØÅ']", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = SANITIZED_SPOKEN_TEXT_PATTERN.sub(" ", text)
+    return MULTISPACE_PATTERN.sub(" ", text).strip()
 
 
 def damerau_levenshtein_distance(source, target):
@@ -306,7 +343,6 @@ def boundary_aware_jaro_winkler_similarity(source, target):
     return max(forward_score, reversed_score)
 
 
-
 def fuzzy_match_threshold(expected_word):
     """Length-aware thresholds tuned for short flashcard answers."""
     normalized_length = len(canonical_danish_form(expected_word))
@@ -318,7 +354,6 @@ def fuzzy_match_threshold(expected_word):
     if normalized_length == 4:
         return 0.76
     return 0.79
-
 
 
 def score_word_match(user_word, expected_word):
@@ -384,12 +419,10 @@ def score_word_match(user_word, expected_word):
     }
 
 
-
 def calculate_accuracy(user_speech, expected_text):
     """
-    Calculate accuracy between user speech and expected text.
-    Word order is intentionally ignored. Each expected word looks for the
-    closest unmatched spoken word.
+    Calculate accuracy between user speech and expected text. 
+    Each expected word looks for the closest unmatched spoken word.
     """
     user_speech = sanitize_spoken_text(user_speech)
     expected_text = sanitize_spoken_text(expected_text)
@@ -467,7 +500,7 @@ def get_feedback_message(accepted_words, total_words):
     return "Very close, try again"
 
 
-def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
+def transcribe_audio(audio_file, language_code=None):
     """
     Transcribe audio by routing the request to the dedicated ASR worker that
     owns the model for the user's learned language.
@@ -478,7 +511,6 @@ def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
         getattr(audio_file, "filename", None),
         getattr(audio_file, "content_type", None),
         language_code,
-        flashcard_id=flashcard_id,
     )
     return transcription_result.get("transcription", "")
 
@@ -496,7 +528,6 @@ def transcribe_audio_endpoint():
     
     Expected form data:
     - file: audio file (required)
-    - flashcard_id: optional ID of the current flashcard
     
     Returns:
     {
@@ -504,32 +535,25 @@ def transcribe_audio_endpoint():
     }
     """
     try:
-        # Get the uploaded file
-        if 'file' not in request.files:
+        if "file" not in request.files:
             return json_result({"error": "No audio file provided"}), 400
 
-        audio_file = request.files['file']
-        if audio_file.filename == '':
+        audio_file = request.files["file"]
+        if audio_file.filename == "":
             return json_result({"error": "Empty filename"}), 400
 
-        user = User.find_by_id(flask.g.user_id)
-        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        user, feature_gate = _current_verbal_flashcards_user()
         if feature_gate:
             return feature_gate
 
-        # Get optional flashcard_id
-        flashcard_id = request.form.get('flashcard_id')
         learned_language_code = user.learned_language.code if user.learned_language else None
 
-        # Transcribe the audio
         transcription = transcribe_audio(
             audio_file,
             language_code=learned_language_code,
-            flashcard_id=flashcard_id,
         )
 
-        # Log user activity
-        log(f"User {user.id} transcribed audio for flashcard {flashcard_id}")
+        log(f"User {user.id} transcribed audio")
 
         return json_result({
             "success": True,
@@ -562,36 +586,38 @@ def get_flashcards():
     Returns list of flashcards.
     """
     try:
-        # Get query parameters
-        limit = int(request.args.get('limit', 50))
-        offset = int(request.args.get('offset', 0))
+        limit = _coerce_int(
+            request.args.get("limit"),
+            DEFAULT_FLASHCARD_LIMIT,
+            minimum=0,
+        )
+        offset = _coerce_int(
+            request.args.get("offset"),
+            DEFAULT_FLASHCARD_OFFSET,
+            minimum=0,
+        )
 
-        # Get all flashcards
-        user = User.find_by_id(flask.g.user_id)
-        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        user, feature_gate = _current_verbal_flashcards_user()
         if feature_gate:
             return feature_gate
         flashcards = get_flashcard_collection(user)
 
-        # Apply pagination
         total = len(flashcards)
         paginated = flashcards[offset:offset + limit]
 
-        # Log user activity
         log(f"User {user.id} requested flashcards")
 
         return json_result({
             "flashcards": paginated,
             "total": total,
             "limit": limit,
-            "offset": offset
+            "offset": offset,
         })
 
     except Exception as e:
         log(f"Get flashcards error: {e}")
         traceback.print_exc()
         return json_result({"error": str(e)}), 500
-
 
 
 @api.route("/verbal_flashcards/submit", methods=["POST"])
@@ -618,45 +644,37 @@ def submit_answer():
         if not data:
             return json_result({"error": "JSON body required"}), 400
 
-        flashcard_id = str(data.get('flashcard_id')) if data.get('flashcard_id') is not None else None
-        user_answer = data.get('user_answer', '')
-        is_correct = data.get('is_correct')
-        answer_source = data.get('answer_source', 'unknown')
-        response_time = data.get('response_time_ms', 0)
-        session_id = data.get('session_id')
+        flashcard_id = str(data.get("flashcard_id")) if data.get("flashcard_id") is not None else None
+        user_answer = data.get("user_answer", "")
+        is_correct = data.get("is_correct")
+        answer_source = data.get("answer_source", "unknown")
+        response_time = data.get("response_time_ms", 0)
+        session_id = data.get("session_id")
 
         if not flashcard_id or is_correct is None:
             return json_result({"error": "flashcard_id and is_correct are required"}), 400
 
-        user = User.find_by_id(flask.g.user_id)
-        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        user, feature_gate = _current_verbal_flashcards_user()
         if feature_gate:
             return feature_gate
-        flashcards = get_flashcard_collection(user)
-        flashcard = next((f for f in flashcards if f['id'] == flashcard_id), None)
+        flashcard = _find_flashcard_for_user(user, flashcard_id)
 
         if not flashcard:
             return json_result({"error": "Flashcard not found"}), 404
 
-        if session_id is not None:
-            try:
-                session_id = int(session_id)
-            except (TypeError, ValueError):
-                return json_result({"error": "session_id must be an integer"}), 400
-
         try:
-            response_time = int(response_time)
-        except (TypeError, ValueError):
-            response_time = 0
+            session_id = _parse_optional_session_id(session_id)
+        except ValueError as exc:
+            return json_result({"error": str(exc)}), 400
 
-        # Calculate accuracy analysis if user_answer is provided
+        response_time = _coerce_int(response_time, minimum=0)
+
         accuracy_analysis = None
         if user_answer:
             expected_text = flashcard["expectedText"]
             accuracy_analysis = calculate_accuracy(user_answer, expected_text)
 
-            # Override is_correct only when the fuzzy matcher accepts the answer.
-            if accuracy_analysis.get('isAccepted'):
+            if accuracy_analysis.get("isAccepted"):
                 is_correct = True
 
         exercise_outcome = ExerciseOutcome.CORRECT if is_correct else ExerciseOutcome.WRONG
@@ -685,7 +703,7 @@ def submit_answer():
             "flashcard_id": flashcard_id,
             "is_correct": is_correct,
             "exercise_outcome": exercise_outcome,
-            "message": "Answer recorded"
+            "message": "Answer recorded",
         }
 
         if accuracy_analysis:
@@ -718,13 +736,12 @@ def check_pronunciation():
         if not data:
             return json_result({"error": "JSON body required"}), 400
 
-        user = User.find_by_id(flask.g.user_id)
-        feature_gate = _ensure_verbal_flashcards_enabled(user)
+        user, feature_gate = _current_verbal_flashcards_user()
         if feature_gate:
             return feature_gate
 
-        user_speech = data.get('user_speech', '')
-        expected_text = data.get('expected_text', '')
+        user_speech = data.get("user_speech", "")
+        expected_text = data.get("expected_text", "")
 
         if not user_speech or not expected_text:
             return json_result({"error": "user_speech and expected_text are required"}), 400

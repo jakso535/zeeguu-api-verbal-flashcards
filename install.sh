@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PYTHON_VERSION="3.11"
+PYTHON_VERSION="3.12"
 
 echo "=== Zeeguu API Local Development Setup ==="
 echo ""

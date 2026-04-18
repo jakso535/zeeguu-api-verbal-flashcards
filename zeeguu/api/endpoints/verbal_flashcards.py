@@ -3,7 +3,7 @@ import flask
 import re
 import unicodedata
 from datetime import datetime
-from flask import request, Response
+from flask import request
 
 from zeeguu.core.model.user import User
 from zeeguu.core.model.user_word import UserWord
@@ -13,9 +13,6 @@ from zeeguu.core.word_scheduling.basicSR.four_levels_per_word import FourLevelsP
 from zeeguu.core.audio_lessons.asr_service_client import (
     ASRServiceNotConfigured,
     ASRServiceRequestError,
-    fetch_asr_worker_stats,
-    get_asr_service_url,
-    get_configured_asr_languages,
     transcribe_with_asr_worker,
 )
 from zeeguu.core.user_feature_toggles import is_feature_enabled_for_user
@@ -35,106 +32,6 @@ def _ensure_verbal_flashcards_enabled(user):
     if is_feature_enabled_for_user("verbal_flashcards", user):
         return None
     return _verbal_flashcards_unavailable_response()
-
-
-def _empty_asr_stats_for_user(user, failure_reason=None):
-    learned_language_code = user.learned_language.code if user and user.learned_language else None
-    configured_worker_url = get_asr_service_url(learned_language_code)
-
-    if not learned_language_code:
-        worker_status = "no_language_selected"
-    elif not configured_worker_url:
-        worker_status = "not_configured"
-    elif failure_reason:
-        worker_status = "error"
-    else:
-        worker_status = "unavailable"
-
-    return {
-        "learned_language": learned_language_code,
-        "configured_languages": get_configured_asr_languages(),
-        "configured_worker_url": configured_worker_url,
-        "worker_name": None,
-        "worker_language": learned_language_code,
-        "worker_status": worker_status,
-        "configured_model_name": None,
-        "asr_available": False,
-        "model_loaded": False,
-        "model_matches_learned_language": False,
-        "load_started_at": None,
-        "load_finished_at": None,
-        "load_duration_ms": None,
-        "process_memory_rss_bytes": None,
-        "process_memory_rss_mb": None,
-        "process_memory_percent": None,
-        "memory_before_load_bytes": None,
-        "memory_before_load_mb": None,
-        "memory_after_load_bytes": None,
-        "memory_after_load_mb": None,
-        "memory_delta_bytes": None,
-        "memory_delta_mb": None,
-        "model_cache_size_bytes": None,
-        "model_cache_size_mb": None,
-        "request_counts": {
-            "total_requests": 0,
-            "successful_requests": 0,
-            "failed_requests": 0,
-            "last_request_at": None,
-        },
-        "last_request_metrics": None,
-        "failure_reason": failure_reason,
-    }
-
-
-def get_asr_stats_for_user(user):
-    learned_language_code = user.learned_language.code if user and user.learned_language else None
-    if not learned_language_code:
-        return _empty_asr_stats_for_user(user)
-
-    configured_worker_url = get_asr_service_url(learned_language_code)
-    if not configured_worker_url:
-        return _empty_asr_stats_for_user(user)
-
-    try:
-        worker_stats = fetch_asr_worker_stats(learned_language_code)
-    except ASRServiceRequestError as exc:
-        log(f"Could not fetch ASR stats for language {learned_language_code}: {exc}")
-        return _empty_asr_stats_for_user(user, failure_reason=str(exc))
-
-    return {
-        "learned_language": learned_language_code,
-        "configured_languages": get_configured_asr_languages(),
-        "configured_worker_url": configured_worker_url,
-        "worker_name": worker_stats.get("worker_name"),
-        "worker_language": worker_stats.get("worker_language"),
-        "worker_status": "ok",
-        "configured_model_name": worker_stats.get("configured_model_name"),
-        "asr_available": bool(worker_stats.get("asr_available")),
-        "model_loaded": bool(worker_stats.get("model_loaded")),
-        "model_matches_learned_language": worker_stats.get("worker_language") == learned_language_code,
-        "load_started_at": worker_stats.get("load_started_at"),
-        "load_finished_at": worker_stats.get("load_finished_at"),
-        "load_duration_ms": worker_stats.get("load_duration_ms"),
-        "process_memory_rss_bytes": worker_stats.get("process_memory_rss_bytes"),
-        "process_memory_rss_mb": worker_stats.get("process_memory_rss_mb"),
-        "process_memory_percent": worker_stats.get("process_memory_percent"),
-        "memory_before_load_bytes": worker_stats.get("memory_before_load_bytes"),
-        "memory_before_load_mb": worker_stats.get("memory_before_load_mb"),
-        "memory_after_load_bytes": worker_stats.get("memory_after_load_bytes"),
-        "memory_after_load_mb": worker_stats.get("memory_after_load_mb"),
-        "memory_delta_bytes": worker_stats.get("memory_delta_bytes"),
-        "memory_delta_mb": worker_stats.get("memory_delta_mb"),
-        "model_cache_size_bytes": worker_stats.get("model_cache_size_bytes"),
-        "model_cache_size_mb": worker_stats.get("model_cache_size_mb"),
-        "request_counts": worker_stats.get("request_counts") or {
-            "total_requests": 0,
-            "successful_requests": 0,
-            "failed_requests": 0,
-            "last_request_at": None,
-        },
-        "last_request_metrics": worker_stats.get("last_request_metrics"),
-        "failure_reason": None,
-    }
 
 
 def _verbal_flashcard_from_user_word(user_word):
@@ -571,7 +468,6 @@ def get_feedback_message(accepted_words, total_words):
 
 
 def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
-
     """
     Transcribe audio by routing the request to the dedicated ASR worker that
     owns the model for the user's learned language.
@@ -584,15 +480,7 @@ def transcribe_audio(audio_file, language_code=None, flashcard_id=None):
         language_code,
         flashcard_id=flashcard_id,
     )
-
-    request_metrics = dict(transcription_result.get("request_metrics") or {})
-    request_metrics.setdefault("language_code", language_code)
-    request_metrics.setdefault("flashcard_id", flashcard_id)
-
-    return {
-        "transcription": transcription_result.get("transcription", ""),
-        "request_metrics": request_metrics,
-    }
+    return transcription_result.get("transcription", "")
 
 
 # ====================================
@@ -612,8 +500,7 @@ def transcribe_audio_endpoint():
     
     Returns:
     {
-        "transcription": "transcribed text",
-        "request_metrics": {...}
+        "transcription": "transcribed text"
     }
     """
     try:
@@ -635,17 +522,11 @@ def transcribe_audio_endpoint():
         learned_language_code = user.learned_language.code if user.learned_language else None
 
         # Transcribe the audio
-        transcription_result = transcribe_audio(
+        transcription = transcribe_audio(
             audio_file,
             language_code=learned_language_code,
             flashcard_id=flashcard_id,
         )
-        if isinstance(transcription_result, dict):
-            transcription = transcription_result.get("transcription", "")
-            request_metrics = transcription_result.get("request_metrics")
-        else:
-            transcription = transcription_result
-            request_metrics = None
 
         # Log user activity
         log(f"User {user.id} transcribed audio for flashcard {flashcard_id}")
@@ -653,7 +534,6 @@ def transcribe_audio_endpoint():
         return json_result({
             "success": True,
             "transcription": transcription,
-            "request_metrics": request_metrics,
         })
 
     except ASRServiceNotConfigured as e:
@@ -713,76 +593,6 @@ def get_flashcards():
         return json_result({"error": str(e)}), 500
 
 
-@api.route("/verbal_flashcards/asr_stats", methods=["GET"])
-@cross_domain
-@requires_session
-def verbal_flashcards_asr_stats():
-    user = User.find_by_id(flask.g.user_id)
-    feature_gate = _ensure_verbal_flashcards_enabled(user)
-    if feature_gate:
-        return feature_gate
-    return json_result(get_asr_stats_for_user(user))
-
-
-@api.route("/verbal_flashcards/asr_metrics", methods=["GET"])
-@cross_domain
-@requires_session
-def verbal_flashcards_asr_metrics():
-    user = User.find_by_id(flask.g.user_id)
-    feature_gate = _ensure_verbal_flashcards_enabled(user)
-    if feature_gate:
-        return feature_gate
-    stats = get_asr_stats_for_user(user)
-    last_request = stats.get("last_request_metrics") or {}
-    request_counts = stats.get("request_counts") or {}
-
-    lines = [
-        "# HELP verbal_flashcards_asr_available Whether ASR libraries are available",
-        "# TYPE verbal_flashcards_asr_available gauge",
-        f"verbal_flashcards_asr_available {1 if stats['asr_available'] else 0}",
-        "",
-        "# HELP verbal_flashcards_asr_model_loaded Whether the ASR model is currently loaded",
-        "# TYPE verbal_flashcards_asr_model_loaded gauge",
-        f"verbal_flashcards_asr_model_loaded {1 if stats['model_loaded'] else 0}",
-        "",
-        "# HELP verbal_flashcards_asr_process_memory_bytes Current ASR worker process RSS memory",
-        "# TYPE verbal_flashcards_asr_process_memory_bytes gauge",
-        f"verbal_flashcards_asr_process_memory_bytes {stats['process_memory_rss_bytes'] or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_model_cache_size_bytes On-disk Hugging Face cache size for the ASR model",
-        "# TYPE verbal_flashcards_asr_model_cache_size_bytes gauge",
-        f"verbal_flashcards_asr_model_cache_size_bytes {stats['model_cache_size_bytes'] or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_load_duration_ms Time spent loading the ASR model at startup",
-        "# TYPE verbal_flashcards_asr_load_duration_ms gauge",
-        f"verbal_flashcards_asr_load_duration_ms {stats['load_duration_ms'] or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_load_memory_delta_bytes Change in worker RSS during ASR model load",
-        "# TYPE verbal_flashcards_asr_load_memory_delta_bytes gauge",
-        f"verbal_flashcards_asr_load_memory_delta_bytes {stats['memory_delta_bytes'] or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_requests_total Total ASR transcription requests",
-        "# TYPE verbal_flashcards_asr_requests_total counter",
-        f"verbal_flashcards_asr_requests_total {request_counts.get('total_requests', 0)}",
-        "",
-        "# HELP verbal_flashcards_asr_requests_failed_total Failed ASR transcription requests",
-        "# TYPE verbal_flashcards_asr_requests_failed_total counter",
-        f"verbal_flashcards_asr_requests_failed_total {request_counts.get('failed_requests', 0)}",
-        "",
-        "# HELP verbal_flashcards_asr_last_request_duration_ms Duration of the most recent ASR request",
-        "# TYPE verbal_flashcards_asr_last_request_duration_ms gauge",
-        f"verbal_flashcards_asr_last_request_duration_ms {last_request.get('request_duration_ms') or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_last_request_memory_delta_bytes Memory delta for the most recent ASR request",
-        "# TYPE verbal_flashcards_asr_last_request_memory_delta_bytes gauge",
-        f"verbal_flashcards_asr_last_request_memory_delta_bytes {last_request.get('process_memory_delta_bytes') or 0}",
-        "",
-        "# HELP verbal_flashcards_asr_last_request_audio_input_bytes Uploaded audio size for the most recent ASR request",
-        "# TYPE verbal_flashcards_asr_last_request_audio_input_bytes gauge",
-        f"verbal_flashcards_asr_last_request_audio_input_bytes {last_request.get('audio_input_bytes') or 0}",
-    ]
-
-    return Response("\n".join(lines) + "\n", mimetype="text/plain")
 
 @api.route("/verbal_flashcards/submit", methods=["POST"])
 @cross_domain

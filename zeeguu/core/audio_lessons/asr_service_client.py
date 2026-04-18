@@ -77,31 +77,6 @@ def get_asr_service_url(language_code, service_url_map=None):
     return service_url_map.get(str(language_code).casefold())
 
 
-def get_configured_asr_languages(service_url_map=None):
-    service_url_map = service_url_map or configured_asr_service_urls()
-    return sorted(service_url_map.keys())
-
-
-def fetch_asr_worker_stats(language_code, service_url_map=None, timeout=None):
-    service_url = get_asr_service_url(language_code, service_url_map=service_url_map)
-    if not service_url:
-        raise ASRServiceNotConfigured(
-            f"No ASR worker configured for language '{language_code}'"
-        )
-
-    try:
-        response = requests.get(
-            f"{service_url}/stats",
-            timeout=timeout or DEFAULT_ASR_SERVICE_TIMEOUT,
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as exc:
-        raise ASRServiceRequestError(
-            f"Could not fetch ASR worker stats from {service_url}: {exc}"
-        ) from exc
-
-
 def transcribe_with_asr_worker(
     audio_bytes,
     filename,

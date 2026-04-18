@@ -44,7 +44,7 @@ except Exception as exc:
     print(f"Failed to load ASR worker model {ASR_MODEL_NAME}: {exc}")
 
 
-def transcribe_audio_file(audio_storage, flashcard_id=None, requested_language_code=None):
+def transcribe_audio_file(audio_storage, requested_language_code=None):
     transcription = None
     temp_path = None
 
@@ -118,13 +118,11 @@ def transcribe():
     if audio_file.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
-    flashcard_id = request.form.get("flashcard_id")
     requested_language_code = request.form.get("language_code")
 
     try:
         transcription = transcribe_audio_file(
             audio_file,
-            flashcard_id=flashcard_id,
             requested_language_code=requested_language_code,
         )
         return jsonify(

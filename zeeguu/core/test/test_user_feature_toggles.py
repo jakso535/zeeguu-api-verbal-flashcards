@@ -34,17 +34,17 @@ def test_verbal_flashcards_feature_uses_invite_code_allowlist(monkeypatch):
     assert _verbal_flashcards(blocked_user) is False
 
 
-def test_verbal_flashcards_feature_accepts_matching_cohort_invite_code(monkeypatch):
+def test_verbal_flashcards_feature_ignores_matching_cohort_invite_code(monkeypatch):
     from zeeguu.core.user_feature_toggles import _verbal_flashcards
 
     monkeypatch.setenv("VERBAL_FLASHCARDS_INVITE_CODES", "beta-one, teacherpilot ")
     cohort_membership = SimpleNamespace(cohort=SimpleNamespace(inv_code="beta-one"))
     allowed_user = _stub_user(invitation_code="classe2019", cohorts=[cohort_membership])
 
-    assert _verbal_flashcards(allowed_user) is True
+    assert _verbal_flashcards(allowed_user) is False
 
 
-def test_verbal_flashcards_feature_keeps_admins_enabled(monkeypatch):
+def test_verbal_flashcards_feature_does_not_bypass_allowlist_for_admins(monkeypatch):
     from zeeguu.core.user_feature_toggles import _verbal_flashcards
 
     monkeypatch.delenv("VERBAL_FLASHCARDS_INVITE_CODES", raising=False)
@@ -58,4 +58,4 @@ def test_verbal_flashcards_feature_keeps_admins_enabled(monkeypatch):
         isTeacher=lambda: False,
     )
 
-    assert _verbal_flashcards(admin_user) is True
+    assert _verbal_flashcards(admin_user) is False

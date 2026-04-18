@@ -17,22 +17,6 @@ def _csv_env_values(env_var_name):
     }
 
 
-def _user_invite_codes(user):
-    invite_codes = set()
-
-    invitation_code = (getattr(user, "invitation_code", None) or "").strip().casefold()
-    if invitation_code:
-        invite_codes.add(invitation_code)
-
-    for user_cohort in getattr(user, "cohorts", []) or []:
-        cohort = getattr(user_cohort, "cohort", None)
-        cohort_invite_code = (getattr(cohort, "inv_code", None) or "").strip().casefold()
-        if cohort_invite_code:
-            invite_codes.add(cohort_invite_code)
-
-    return invite_codes
-
-
 def _feature_map():
     return {
         "audio_exercises": _audio_exercises,
@@ -115,14 +99,12 @@ def _hide_recommendations(user):
 
 def _verbal_flashcards(user):
     """
-    Enable verbal flashcards for users whose invite/cohort code is explicitly
-    allow-listed. This keeps the feature easy to roll out to a small group.
+    Enable verbal flashcards only for users whose own stored invitation code
+    is explicitly allow-listed.
     """
-    if user.is_admin or user.is_dev:
-        return True
-
     allowed_invite_codes = _csv_env_values("VERBAL_FLASHCARDS_INVITE_CODES")
     if not allowed_invite_codes:
         return False
 
-    return bool(_user_invite_codes(user) & allowed_invite_codes)
+    invitation_code = (getattr(user, "invitation_code", None) or "").strip().casefold()
+    return invitation_code in allowed_invite_codes

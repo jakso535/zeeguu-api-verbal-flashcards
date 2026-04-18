@@ -18,6 +18,11 @@ def _enable_verbal_flashcards_feature(monkeypatch):
     )
 
 
+def _prepare_bookmark_support():
+    add_context_types()
+    add_source_types()
+
+
 def _set_bookmark_level(bookmark_id, level):
     from zeeguu.core.model.bookmark import Bookmark
     from zeeguu.core.model.db import db
@@ -57,8 +62,7 @@ def _create_level_3_flashcard(client, word="hinter", translation="behind"):
 
 
 def test_verbal_flashcards_only_returns_level_3_plus_words(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
     bookmark = _set_bookmark_level(bookmark_id, 2)
@@ -80,8 +84,7 @@ def test_verbal_flashcards_only_returns_level_3_plus_words(client):
 
 
 def test_verbal_flashcards_returns_404_when_feature_is_disabled(client, monkeypatch):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     monkeypatch.setattr(
         "zeeguu.api.endpoints.verbal_flashcards.is_feature_enabled_for_user",
@@ -95,8 +98,7 @@ def test_verbal_flashcards_returns_404_when_feature_is_disabled(client, monkeypa
 
 
 def test_verbal_flashcards_deduplicate_same_origin_word(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     _create_level_3_flashcard(client, word="hinter", translation="behind")
     _create_level_3_flashcard(client, word="hinter", translation="at the back of")
@@ -108,8 +110,7 @@ def test_verbal_flashcards_deduplicate_same_origin_word(client):
 
 
 def test_verbal_flashcards_paginates_results(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     _create_level_3_flashcard(client, word="hinter", translation="behind")
     _create_level_3_flashcard(client, word="gehen", translation="go")
@@ -190,8 +191,7 @@ def test_calculate_accuracy_marks_close_but_incorrect_words():
 
 
 def test_check_pronunciation_requires_both_fields(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     response = client.client.post(
         client.append_session("/verbal_flashcards/check_pronunciation"),
@@ -203,8 +203,7 @@ def test_check_pronunciation_requires_both_fields(client):
 
 
 def test_check_pronunciation_returns_accuracy_analysis(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     response = client.post(
         "/verbal_flashcards/check_pronunciation",
@@ -231,17 +230,14 @@ def test_parse_asr_service_urls_supports_multiple_language_workers():
 
 
 def test_transcribe_endpoint_returns_transcription(client, monkeypatch):
-    add_context_types()
-    add_source_types()
-
     monkeypatch.setattr(
         "zeeguu.api.endpoints.verbal_flashcards.transcribe_audio",
-        lambda audio_file, language_code=None, flashcard_id=None: "hej",
+        lambda audio_file, language_code=None: "hej",
     )
 
     response = client.client.post(
         client.append_session("/verbal_flashcards/transcribe"),
-        data={"file": (io.BytesIO(b"fake audio"), "sample.wav"), "flashcard_id": "17"},
+        data={"file": (io.BytesIO(b"fake audio"), "sample.wav")},
         content_type="multipart/form-data",
     )
 
@@ -262,7 +258,6 @@ def test_transcribe_audio_routes_to_language_worker(monkeypatch):
         filename,
         content_type,
         language_code,
-        flashcard_id=None,
         service_url_map=None,
         timeout=None,
     ):
@@ -270,7 +265,6 @@ def test_transcribe_audio_routes_to_language_worker(monkeypatch):
         captured["filename"] = filename
         captured["content_type"] = content_type
         captured["language_code"] = language_code
-        captured["flashcard_id"] = flashcard_id
         return {"transcription": "hej"}
 
     monkeypatch.setattr(
@@ -288,7 +282,6 @@ def test_transcribe_audio_routes_to_language_worker(monkeypatch):
     result = verbal_flashcards.transcribe_audio(
         audio_file,
         language_code="da",
-        flashcard_id="17",
     )
 
     assert result == "hej"
@@ -296,16 +289,12 @@ def test_transcribe_audio_routes_to_language_worker(monkeypatch):
     assert captured["filename"] == "sample.webm"
     assert captured["content_type"] == "audio/webm"
     assert captured["language_code"] == "da"
-    assert captured["flashcard_id"] == "17"
 
 
 def test_transcribe_endpoint_returns_503_when_worker_is_not_configured(client, monkeypatch):
-    add_context_types()
-    add_source_types()
-
     from zeeguu.core.audio_lessons.asr_service_client import ASRServiceNotConfigured
 
-    def raise_not_configured(audio_file, language_code=None, flashcard_id=None):
+    def raise_not_configured(audio_file, language_code=None):
         raise ASRServiceNotConfigured("No ASR worker configured for language 'de'")
 
     monkeypatch.setattr(
@@ -315,7 +304,7 @@ def test_transcribe_endpoint_returns_503_when_worker_is_not_configured(client, m
 
     response = client.client.post(
         client.append_session("/verbal_flashcards/transcribe"),
-        data={"file": (io.BytesIO(b"fake audio"), "sample.wav"), "flashcard_id": "17"},
+        data={"file": (io.BytesIO(b"fake audio"), "sample.wav")},
         content_type="multipart/form-data",
     )
 
@@ -324,8 +313,7 @@ def test_transcribe_endpoint_returns_503_when_worker_is_not_configured(client, m
 
 
 def test_verbal_flashcards_submit_reports_exercise_outcome(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
 
@@ -361,8 +349,7 @@ def test_verbal_flashcards_submit_reports_exercise_outcome(client):
 
 
 def test_submit_uses_fuzzy_acceptance_to_override_is_correct(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
     _set_bookmark_level(bookmark_id, 3)
@@ -387,8 +374,7 @@ def test_submit_uses_fuzzy_acceptance_to_override_is_correct(client):
 
 
 def test_submit_rejects_non_integer_session_id(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
     _set_bookmark_level(bookmark_id, 3)
@@ -408,8 +394,7 @@ def test_submit_rejects_non_integer_session_id(client):
 
 
 def test_submit_coerces_invalid_response_time_to_zero(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
 
@@ -434,8 +419,7 @@ def test_submit_coerces_invalid_response_time_to_zero(client):
 
 
 def test_submit_returns_404_for_non_flashcard_word(client):
-    add_context_types()
-    add_source_types()
+    _prepare_bookmark_support()
 
     bookmark_id = add_one_bookmark(client)
     _set_bookmark_level(bookmark_id, 1)

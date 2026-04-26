@@ -28,6 +28,7 @@ from .teacher_dashboard import *
 from . import topics
 from . import search
 from . import article
+from . import article_upload
 from . import accounts
 from . import speech
 from . import own_texts
@@ -49,3 +50,6 @@ from . import user_stats
 from . import session_history
 from . import daily_streak
 from . import verbal_flashcards
+from . import badges
+from . import friends
+from . import leaderboards

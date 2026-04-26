@@ -2,6 +2,7 @@ import json
 import traceback
 
 import flask
+import sentry_sdk
 from flask import request, Response
 
 from zeeguu.api.utils.json_result import json_result
@@ -28,6 +29,62 @@ MAX_EXAMPLES_GENERATE = 3     # Max examples for generate_examples endpoint
 DEFAULT_CEFR_LEVEL = "B1"
 
 
+def _build_bookmark_dict_for_example(user, user_word, example_sentence_obj):
+    """
+    Find or create a Bookmark for an ExampleSentence and return its full
+    serialized dict (with context_tokenized). Returns None if the target
+    word can't be located in the example.
+
+    Used by /alternative_sentences so the frontend has the full bookmark
+    data up-front and doesn't need to wait for /set_preferred_example on
+    every swipe.
+    """
+    target_word = user_word.meaning.origin.content
+    selected_sentence = example_sentence_obj.sentence
+
+    result = find_first_occurrence(
+        target_word, selected_sentence, user_word.meaning.origin.language
+    )
+    if not result["found"]:
+        log(
+            f"Skipping example {example_sentence_obj.id} for prefetch: "
+            f"{result['error_message']}"
+        )
+        return None
+
+    pos = result["position_data"]
+
+    context_identifier = ContextIdentifier(
+        context_type=ContextType.EXAMPLE_SENTENCE,
+        example_sentence_id=example_sentence_obj.id,
+    )
+
+    bookmark = Bookmark.find_or_create(
+        db_session,
+        user,
+        user_word.meaning.origin.content,
+        user_word.meaning.origin.language.code,
+        user_word.meaning.translation.content,
+        user_word.meaning.translation.language.code,
+        selected_sentence,
+        None,  # article_id
+        None,  # source_id
+        sentence_i=pos["sentence_i"],
+        token_i=pos["token_i"],
+        total_tokens=pos["total_tokens"],
+        c_sentence_i=pos["c_sentence_i"],
+        c_token_i=pos["c_token_i"],
+        context_identifier=context_identifier,
+    )
+
+    bookmark_dict = bookmark.as_dictionary(
+        with_context=True, with_context_tokenized=True
+    )
+    bookmark_dict["from_lang"] = user_word.meaning.origin.language.code
+    bookmark_dict["to_lang"] = user_word.meaning.translation.language.code
+    return bookmark_dict
+
+
 @api.route("/alternative_sentences/<user_word_id>", methods=["GET"])
 @cross_domain
 @requires_session
@@ -51,6 +108,11 @@ def alternative_sentences(user_word_id):
     translation = user_word.meaning.translation.content
     origin_lang = user_word.meaning.origin.language.code
     translation_lang = user_word.meaning.translation.language.code
+
+    # Get the current context so we can exclude it from alternatives
+    current_context = ""
+    if user_word.preferred_bookmark and user_word.preferred_bookmark.context:
+        current_context = user_word.preferred_bookmark.get_context().strip().lower()
 
     # Determine CEFR level
     cefr_level = request.args.get("cefr_level", DEFAULT_CEFR_LEVEL)
@@ -84,6 +146,10 @@ def alternative_sentences(user_word_id):
         prompt_version = "pregenerated"
 
         for db_example in db_examples:
+            # Skip examples that duplicate the current exercise context
+            if db_example.sentence.strip().lower() == current_context:
+                continue
+
             example_dict = {
                 "id": db_example.id,  # Include the sentence ID
                 "sentence": db_example.sentence,
@@ -100,6 +166,14 @@ def alternative_sentences(user_word_id):
                     else "unknown"
                 ),
             }
+
+            # Pre-create bookmark so frontend can render instantly on swipe
+            bookmark_dict = _build_bookmark_dict_for_example(
+                user, user_word, db_example
+            )
+            if bookmark_dict:
+                example_dict["bookmark"] = bookmark_dict
+
             examples.append(example_dict)
 
             # Use the first example's ai_generator_id for consistency
@@ -173,16 +247,37 @@ def alternative_sentences(user_word_id):
             f"Saved {len(examples)} real-time generated examples to database for user_word {user_word_id}"
         )
 
-        # Add IDs to the examples we're returning
+        # commit() expires all ORM attributes by default, so the downstream
+        # bookmark-building loop would lazy-reload user_word.meaning.*. If the
+        # row was deleted mid-request (parallel tab, session closed) that lazy
+        # reload raises ObjectDeletedError deep in the loop and surfaces as a
+        # 500. Refresh here so we fail fast with a clean 404 in that case.
+        try:
+            db_session.refresh(user_word)
+        except Exception:
+            return json_result(
+                {"error": "UserWord not found or unauthorized"}, status=404
+            )
+
+        # Add IDs and pre-created bookmarks, skipping duplicates of current context
+        filtered_examples = []
         for i, example in enumerate(examples):
+            if example["sentence"].strip().lower() == current_context:
+                continue
             example["id"] = saved_examples[i].id
+            bookmark_dict = _build_bookmark_dict_for_example(
+                user, user_word, saved_examples[i]
+            )
+            if bookmark_dict:
+                example["bookmark"] = bookmark_dict
+            filtered_examples.append(example)
 
         return json_result(
             {
                 "user_word_id": user_word_id,
                 "word": origin_word,
                 "translation": translation,
-                "examples": examples,
+                "examples": filtered_examples,
                 "ai_generator_id": ai_generator.id,
                 "llm_model": llm_model,
                 "prompt_version": prompt_version,
@@ -192,6 +287,13 @@ def alternative_sentences(user_word_id):
 
     except Exception as e:
         log(f"Error generating examples for user_word {user_word_id}: {e}")
+        sentry_sdk.capture_exception(
+            e,
+            tags={
+                "endpoint": "alternative_sentences",
+                "user_word_id": str(user_word_id),
+            },
+        )
 
         resp = json_result(
             {

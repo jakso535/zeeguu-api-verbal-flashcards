@@ -53,15 +53,20 @@ class Cohort(db.Model):
         from zeeguu.core.model.user_cohort_map import UserCohortMap
 
         users = []
+
+        # Backwards compatibility: users who were assigned only via invitation_code
         if self.inv_code and len(self.inv_code) > 1:
-            # adding those users that are only assigned based on
-            # invitation code; this is for bacwards compatibility reasons
-            users_in_UserCohortMap = exists().where(User.id == UserCohortMap.user_id)
+            # Simpler and safer: just fetch users with matching invitation_code
             users.extend(
-                User.query.filter_by(invitation_code=self.inv_code).filter(
-                    ~users_in_UserCohortMap
-                )
+                User.query.filter_by(invitation_code=self.inv_code).all()
             )
+
+        # Add users explicitly mapped via UserCohortMap
+        users.extend(
+            User.query.join(UserCohortMap).filter(UserCohortMap.cohort_id == self.id).all()
+        )
+
+        return users
 
         users.extend(
             User.query.join(UserCohortMap).filter(UserCohortMap.cohort == self).all()

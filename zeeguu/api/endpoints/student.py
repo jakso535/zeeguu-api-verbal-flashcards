@@ -1,8 +1,9 @@
 import flask
-from flask import request
+from flask import request, jsonify
 from zeeguu.api.utils import json_result
 
 from zeeguu.core.model import Cohort, User
+from zeeguu.core.model.user_cohort_map import UserCohortMap
 
 from zeeguu.api.utils.route_wrappers import cross_domain, requires_session
 from . import api, db_session
@@ -14,26 +15,35 @@ from . import api, db_session
 @cross_domain
 @requires_session
 def join_cohort_api():
-    invite_code = request.form.get("invite_code", "")
+    invite_code = request.form.get("invite_code", "").strip()
 
     if not invite_code:
-        flask.abort(400)
+        return jsonify({"status": "error", "message": "Missing invite code"}), 400
 
+    # Validate invite code
     try:
         cohort = Cohort.find_by_code(invite_code)
-        user = User.find_by_id(flask.g.user_id)
-        user.add_user_to_cohort(cohort, db_session)
+    except:
+        return jsonify({"status": "error", "message": "Invalid invite code"}), 400
 
-        return "OK"
+    user = User.find_by_id(flask.g.user_id)
 
-    except Exception as e:
-        from sentry_sdk import capture_exception
+    # Idempotent join: if already in cohort, return success
+    existing = UserCohortMap.query.filter_by(
+        user_id=user.id,
+        cohort_id=cohort.id
+    ).first()
 
-        capture_exception(e)
-        flask.abort(500)
+    if not existing:
+        db_session.add(UserCohortMap(user_id=user.id, cohort_id=cohort.id))
+        db_session.commit()
+
+    return jsonify({"status": "ok", "cohort_id": cohort.id}), 200
 
 
+# ---------------------------------------------------------------------------
 @api.route("/student_info", methods=["GET"])
+# ---------------------------------------------------------------------------
 @cross_domain
 @requires_session
 def student_info():
@@ -48,7 +58,9 @@ def student_info():
     )
 
 
+# ---------------------------------------------------------------------------
 @api.route("/cohort_name/<id>", methods=["GET"])
+# ---------------------------------------------------------------------------
 @requires_session
 def cohort_name(id):
 
